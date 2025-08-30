@@ -62,7 +62,6 @@ type MustGatherSpec struct {
 
 	// A flag to specify if resources (secret, job, pods) should be retained when the MustGather completes.
 	// If set to true, resources will be retained. If false or not set, resources will be deleted (default behavior).
-	// Note: The MustGather CR itself will always be retained regardless of this flag.
 	// +kubebuilder:default:=false
 	RetainResourcesOnCompletion bool `json:"retainResourcesOnCompletion,omitempty"`
 }

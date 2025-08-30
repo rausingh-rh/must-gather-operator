@@ -118,17 +118,18 @@ func (r *MustGatherReconciler) Reconcile(ctx context.Context, request reconcile.
 	// indicated by the deletion timestamp being set.
 	isMustGatherMarkedToBeDeleted := instance.GetDeletionTimestamp() != nil
 	if isMustGatherMarkedToBeDeleted {
-		reqLogger.Info("MustGather instance is marked to be deleted")
+		reqLogger.Info("mustgather instance is marked for deletion")
 		if contains(instance.GetFinalizers(), mustGatherFinalizer) {
 			// Run finalization logic for mustGatherFinalizer. If the
 			// finalization logic fails, don't remove the finalizer so
 			// that we can retry during the next reconciliation.
-			reqLogger.Info("Running finalization logic for mustGatherFinalizer")
+
 			// Clean up resources if RetainResourcesOnCompletion is false (default behavior)
 			if !instance.Spec.RetainResourcesOnCompletion {
+				reqLogger.V(4).Info("running finalization logic for mustGatherFinalizer")
 				err := r.cleanupMustGatherResources(reqLogger, instance, operatorNs)
 				if err != nil {
-					reqLogger.Error(err, "Failed to cleanup MustGather resources during deletion")
+					reqLogger.Error(err, "failed to cleanup MustGather resources during deletion")
 					return reconcile.Result{}, err
 				}
 			}
@@ -221,12 +222,12 @@ func (r *MustGatherReconciler) Reconcile(ctx context.Context, request reconcile.
 
 	// Check status of job and update any metric counts
 	if job1.Status.Active > 0 {
-		reqLogger.Info("MustGather Job pods are still running")
+		reqLogger.Info("mustgather Job pods are still running")
 	} else {
 		// if the job has been marked as Succeeded or Failed but instance has no DeletionTimestamp,
 		// requeue instance to handle resource clean-up (delete secret, job, and MustGather)
 		if job1.Status.Succeeded > 0 {
-			reqLogger.Info("MustGather Job pods succeeded")
+			reqLogger.Info("mustgather Job pods succeeded")
 			// Update the MustGather CR status to indicate success
 			instance.Status.Status = "Completed"
 			instance.Status.Completed = true
@@ -241,14 +242,14 @@ func (r *MustGatherReconciler) Reconcile(ctx context.Context, request reconcile.
 			if !instance.Spec.RetainResourcesOnCompletion {
 				err := r.cleanupMustGatherResources(reqLogger, instance, operatorNs)
 				if err != nil {
-					reqLogger.Error(err, "Failed to cleanup MustGather resources")
+					reqLogger.Error(err, "failed to cleanup MustGather resources")
 					return r.ManageError(context.TODO(), instance, err)
 				}
 			}
 			return reconcile.Result{}, nil
 		}
 		if job1.Status.Failed > 0 {
-			reqLogger.Info("MustGather Job pods failed")
+			reqLogger.Info("mustgather Job pods failed")
 			// Increment prometheus metrics for must gather errors
 			localmetrics.MetricMustGatherErrors.Inc()
 			// Update the MustGather CR status to indicate failure
@@ -265,7 +266,7 @@ func (r *MustGatherReconciler) Reconcile(ctx context.Context, request reconcile.
 			if !instance.Spec.RetainResourcesOnCompletion {
 				err := r.cleanupMustGatherResources(reqLogger, instance, operatorNs)
 				if err != nil {
-					reqLogger.Error(err, "Failed to cleanup MustGather resources")
+					reqLogger.Error(err, "failed to cleanup MustGather resources")
 					return r.ManageError(context.TODO(), instance, err)
 				}
 			}
@@ -394,7 +395,7 @@ func remove(list []string, s string) []string {
 
 // cleanupMustGatherResources cleans up the secret, job, and pods associated with a MustGather instance
 func (r *MustGatherReconciler) cleanupMustGatherResources(reqLogger logr.Logger, instance *mustgatherv1alpha1.MustGather, operatorNs string) error {
-	reqLogger.Info("Cleaning up MustGather resources")
+	reqLogger.Info("cleaning up MustGather resources")
 	// delete secret in the operator namespace
 	tmpSecretName := instance.Spec.CaseManagementAccountSecretRef.Name
 	tmpSecret := &corev1.Secret{}
@@ -405,16 +406,16 @@ func (r *MustGatherReconciler) cleanupMustGatherResources(reqLogger logr.Logger,
 
 	if err != nil {
 		if !errors.IsNotFound(err) {
-			reqLogger.Error(err, fmt.Sprintf("Failed to get %s secret", tmpSecretName))
+			reqLogger.Error(err, fmt.Sprintf("failed to get %s secret", tmpSecretName))
 		}
 		// Secret not found, continue with cleanup
 	} else {
 		err = r.GetClient().Delete(context.TODO(), tmpSecret)
 		if err != nil {
-			reqLogger.Error(err, fmt.Sprintf("Failed to delete %s secret", tmpSecretName))
+			reqLogger.Error(err, fmt.Sprintf("failed to delete %s secret", tmpSecretName))
 			return err
 		}
-		reqLogger.Info(fmt.Sprintf("Successfully deleted secret %s", tmpSecretName))
+		reqLogger.Info(fmt.Sprintf("successfully deleted secret %s", tmpSecretName))
 	}
 
 	// delete job from operator namespace
@@ -425,7 +426,7 @@ func (r *MustGatherReconciler) cleanupMustGatherResources(reqLogger logr.Logger,
 	}, tmpJob)
 	if err != nil {
 		if !errors.IsNotFound(err) {
-			reqLogger.Error(err, fmt.Sprintf("Failed to get %s job", instance.Name))
+			reqLogger.Error(err, fmt.Sprintf("failed to get %s job", instance.Name))
 		}
 		// Job not found, continue with cleanup
 	} else {
@@ -436,26 +437,26 @@ func (r *MustGatherReconciler) cleanupMustGatherResources(reqLogger logr.Logger,
 			client.MatchingLabels{"controller-uid": string(tmpJob.UID)},
 		}
 		if err = r.GetClient().List(context.TODO(), podList, listOpts...); err != nil {
-			reqLogger.Error(err, "Failed to list pods", "Namespace", operatorNs, "UID", tmpJob.UID)
+			reqLogger.Error(err, "failed to list pods", "Namespace", operatorNs, "UID", tmpJob.UID)
 		} else {
 			for _, tmpPod := range podList.Items {
 				err = r.GetClient().Delete(context.TODO(), &tmpPod)
 				if err != nil {
-					reqLogger.Error(err, fmt.Sprintf("Failed to delete %s pod", tmpPod.Name))
+					reqLogger.Error(err, fmt.Sprintf("failed to delete %s pod", tmpPod.Name))
 					return err
 				}
 			}
-			reqLogger.Info(fmt.Sprintf("Deleted pods for job %s", tmpJob.Name))
+			reqLogger.Info(fmt.Sprintf("deleted pods for job %s", tmpJob.Name))
 			// finally delete job
 			err = r.GetClient().Delete(context.TODO(), tmpJob)
 			if err != nil {
-				reqLogger.Error(err, fmt.Sprintf("Failed to delete %s job", tmpJob.Name))
+				reqLogger.Error(err, fmt.Sprintf("failed to delete %s job", tmpJob.Name))
 				return err
 			}
-			reqLogger.Info(fmt.Sprintf("Deleted pods for job %s", tmpJob.Name))
+			reqLogger.Info(fmt.Sprintf("deleted job %s", tmpJob.Name))
 		}
 	}
 
-	reqLogger.Info("Successfully cleaned up MustGather resources")
+	reqLogger.V(4).Info("successfully cleaned up mustgather resources")
 	return nil
 }
