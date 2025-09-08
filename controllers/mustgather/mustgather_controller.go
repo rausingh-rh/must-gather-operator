@@ -98,7 +98,7 @@ func (r *MustGatherReconciler) Reconcile(ctx context.Context, request reconcile.
 		return reconcile.Result{}, err
 	}
 
-	if !r.IsInitialized(instance) {
+	if !r.IsInitialized(ctx, instance) {
 		err := r.GetClient().Update(ctx, instance)
 		if err != nil {
 			log.Error(err, "unable to update instance", "instance", instance)
@@ -147,12 +147,12 @@ func (r *MustGatherReconciler) Reconcile(ctx context.Context, request reconcile.
 
 	// Add finalizer for this CR
 	if !contains(instance.GetFinalizers(), mustGatherFinalizer) {
-		if err := r.addFinalizer(reqLogger, instance); err != nil {
+		if err := r.addFinalizer(ctx, reqLogger, instance); err != nil {
 			return reconcile.Result{}, err
 		}
 	}
 
-	job, err := r.getJobFromInstance(instance)
+	job, err := r.getJobFromInstance(ctx, instance)
 	if err != nil {
 		log.Error(err, "unable to get job from", "instance", instance)
 		return r.ManageError(ctx, instance, err)
@@ -278,14 +278,14 @@ func (r *MustGatherReconciler) Reconcile(ctx context.Context, request reconcile.
 	// 1. the mustgather instance was updated, which we don't support and we are going to ignore
 	// 2. the job was updated, probably the status piece. we should the update the status of the instance, not supported yet.
 
-	return r.updateStatus(instance, job1)
+	return r.updateStatus(ctx, instance, job1)
 
 }
 
-func (r *MustGatherReconciler) updateStatus(instance *mustgatherv1alpha1.MustGather, job *batchv1.Job) (reconcile.Result, error) {
+func (r *MustGatherReconciler) updateStatus(ctx context.Context, instance *mustgatherv1alpha1.MustGather, job *batchv1.Job) (reconcile.Result, error) {
 	instance.Status.Completed = !job.Status.CompletionTime.IsZero()
 
-	return r.ManageSuccess(context.TODO(), instance)
+	return r.ManageSuccess(ctx, instance)
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -296,7 +296,7 @@ func (r *MustGatherReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-func (r *MustGatherReconciler) IsInitialized(instance *mustgatherv1alpha1.MustGather) bool {
+func (r *MustGatherReconciler) IsInitialized(ctx context.Context, instance *mustgatherv1alpha1.MustGather) bool {
 	initialized := true
 
 	if instance.Spec.ServiceAccountRef.Name == "" {
@@ -305,7 +305,7 @@ func (r *MustGatherReconciler) IsInitialized(instance *mustgatherv1alpha1.MustGa
 	}
 	if reflect.DeepEqual(instance.Spec.ProxyConfig, configv1.ProxySpec{}) {
 		platformProxy := &configv1.Proxy{}
-		err := r.GetClient().Get(context.TODO(), types.NamespacedName{Name: "cluster"}, platformProxy)
+		err := r.GetClient().Get(ctx, types.NamespacedName{Name: "cluster"}, platformProxy)
 		if err != nil {
 			log.Error(err, "unable to find cluster proxy configuration")
 		} else {
@@ -321,12 +321,12 @@ func (r *MustGatherReconciler) IsInitialized(instance *mustgatherv1alpha1.MustGa
 }
 
 // addFinalizer is a function that adds a finalizer for the MustGather CR
-func (r *MustGatherReconciler) addFinalizer(reqLogger logr.Logger, m *mustgatherv1alpha1.MustGather) error {
+func (r *MustGatherReconciler) addFinalizer(ctx context.Context, reqLogger logr.Logger, m *mustgatherv1alpha1.MustGather) error {
 	reqLogger.Info("Adding Finalizer for the MustGather")
 	m.SetFinalizers(append(m.GetFinalizers(), mustGatherFinalizer))
 
 	// Update CR
-	err := r.GetClient().Update(context.TODO(), m)
+	err := r.GetClient().Update(ctx, m)
 	if err != nil {
 		reqLogger.Error(err, "Failed to update MustGather with finalizer")
 		return err
@@ -334,7 +334,7 @@ func (r *MustGatherReconciler) addFinalizer(reqLogger logr.Logger, m *mustgather
 	return nil
 }
 
-func (r *MustGatherReconciler) getJobFromInstance(instance *mustgatherv1alpha1.MustGather) (*batchv1.Job, error) {
+func (r *MustGatherReconciler) getJobFromInstance(ctx context.Context, instance *mustgatherv1alpha1.MustGather) (*batchv1.Job, error) {
 	// Inject the operator image URI from the pod's env variables
 	operatorImage, varPresent := os.LookupEnv("OPERATOR_IMAGE")
 	if !varPresent {
@@ -343,7 +343,7 @@ func (r *MustGatherReconciler) getJobFromInstance(instance *mustgatherv1alpha1.M
 		return nil, err
 	}
 
-	version, err := r.getClusterVersionForJobTemplate("version")
+	version, err := r.getClusterVersionForJobTemplate(ctx, "version")
 	if err != nil {
 		return nil, fmt.Errorf("failed to get cluster version for job template: %w", err)
 	}
@@ -351,9 +351,9 @@ func (r *MustGatherReconciler) getJobFromInstance(instance *mustgatherv1alpha1.M
 	return getJobTemplate(operatorImage, version, *instance), nil
 }
 
-func (r *MustGatherReconciler) getClusterVersionForJobTemplate(clusterVersionName string) (string, error) {
+func (r *MustGatherReconciler) getClusterVersionForJobTemplate(ctx context.Context, clusterVersionName string) (string, error) {
 	clusterVersion := &configv1.ClusterVersion{}
-	err := r.GetClient().Get(context.TODO(), types.NamespacedName{Name: clusterVersionName}, clusterVersion)
+	err := r.GetClient().Get(ctx, types.NamespacedName{Name: clusterVersionName}, clusterVersion)
 	if err != nil {
 		return "", fmt.Errorf("unable to get clusterversion '%v': %w", clusterVersionName, err)
 	}

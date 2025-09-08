@@ -108,7 +108,7 @@ func TestMustGatherReconciler_getClusterVersionForJobTemplate(t *testing.T) {
 			r := &MustGatherReconciler{
 				ReconcilerBase: util.NewReconcilerBase(fakeClient, fakeClient.Scheme(), &rest.Config{}, &record.FakeRecorder{}, nil),
 			}
-			got, err := r.getClusterVersionForJobTemplate(tt.clusterVersionName)
+			got, err := r.getClusterVersionForJobTemplate(context.TODO(), tt.clusterVersionName)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("getClusterVersionForJobTemplate() error = %v, wantErr %v", err, tt.wantErr)
 				return
