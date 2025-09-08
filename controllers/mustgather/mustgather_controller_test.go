@@ -14,10 +14,10 @@ import (
 	"github.com/redhat-cop/operator-utils/pkg/util"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/record"
 
@@ -27,83 +27,6 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
-
-func TestMustGatherController(t *testing.T) {
-	mgObj := createMustGatherObject()
-	secObj := createMustGatherSecretObject()
-
-	objs := []runtime.Object{
-		mgObj,
-		secObj,
-	}
-
-	var cfg *rest.Config
-
-	s := scheme.Scheme
-	s.AddKnownTypes(mustgatherv1alpha1.GroupVersion, mgObj)
-
-	cl := fake.NewClientBuilder().WithScheme(s).WithRuntimeObjects(objs...).Build()
-
-	eventRec := &record.FakeRecorder{}
-
-	r := MustGatherReconciler{
-		ReconcilerBase: util.NewReconcilerBase(cl, s, cfg, eventRec, nil),
-	}
-
-	req := reconcile.Request{
-		NamespacedName: types.NamespacedName{
-			Name:      mgObj.Name,
-			Namespace: mgObj.Namespace,
-		},
-	}
-
-	res, err := r.Reconcile(context.TODO(), req)
-	if err != nil {
-		t.Fatalf("reconcile: (%v)", err)
-	}
-
-	if res != (reconcile.Result{}) {
-		t.Error("reconcile did not return an empty Result")
-	}
-}
-
-func createMustGatherObject() *mustgatherv1alpha1.MustGather {
-	return &mustgatherv1alpha1.MustGather{
-		TypeMeta: metav1.TypeMeta{
-			Kind: "MustGather",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-must-gather",
-			Namespace: "must-gather-operator",
-		},
-		Spec: mustgatherv1alpha1.MustGatherSpec{
-			CaseID: "01234567",
-			CaseManagementAccountSecretRef: corev1.LocalObjectReference{
-				Name: "case-management-creds",
-			},
-			ServiceAccountRef: corev1.LocalObjectReference{
-				Name: "",
-			},
-		},
-	}
-}
-
-func createMustGatherSecretObject() *corev1.Secret {
-	return &corev1.Secret{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       "Secret",
-			APIVersion: corev1.SchemeGroupVersion.String(),
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "case-management-creds",
-			Namespace: "must-gather-operator",
-		},
-		Data: map[string][]byte{
-			"username": []byte("somefakeuser"),
-			"password": []byte("somefakepassword"),
-		},
-	}
-}
 
 func generateFakeClient(objs ...client.Object) (client.Client, error) {
 	s := runtime.NewScheme()
@@ -197,84 +120,6 @@ func TestMustGatherReconciler_getClusterVersionForJobTemplate(t *testing.T) {
 	}
 }
 
-// failingStatusClient wraps a client.Client and forces Status().Update to return an error
-type failingStatusClient struct{ client.Client }
-
-func (c failingStatusClient) Status() client.StatusWriter {
-	return failingStatusWriter{c.Client.Status()}
-}
-
-type failingStatusWriter struct{ client.StatusWriter }
-
-func (w failingStatusWriter) Update(ctx context.Context, obj client.Object, opts ...client.SubResourceUpdateOption) error {
-	return errors.New("forced status update error")
-}
-
-func TestReconcile_JobSucceeded_StatusUpdateFails(t *testing.T) {
-	t.Setenv("OPERATOR_IMAGE", "quay.io/openshift/must-gather-operator:latest")
-
-	// Objects: MustGather (finalizer present), Job with Succeeded>0, ClusterVersion
-	mg := &mustgatherv1alpha1.MustGather{ObjectMeta: metav1.ObjectMeta{Name: "test-must-gather", Namespace: "must-gather-operator", Finalizers: []string{mustGatherFinalizer}}, Spec: mustgatherv1alpha1.MustGatherSpec{CaseID: "01234567", CaseManagementAccountSecretRef: corev1.LocalObjectReference{Name: "case-management-creds"}, ServiceAccountRef: corev1.LocalObjectReference{Name: "default"}}}
-	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: mg.Name, Namespace: mg.Namespace}, Status: batchv1.JobStatus{Succeeded: 1}}
-	cv := &configv1.ClusterVersion{ObjectMeta: metav1.ObjectMeta{Name: "version"}, Status: configv1.ClusterVersionStatus{History: []configv1.UpdateHistory{{State: "Completed", Version: "1.2.3"}}}}
-
-	s := runtime.NewScheme()
-	if err := corev1.AddToScheme(s); err != nil {
-		t.Fatalf("add corev1: %v", err)
-	}
-	if err := batchv1.AddToScheme(s); err != nil {
-		t.Fatalf("add batchv1: %v", err)
-	}
-	if err := mustgatherv1alpha1.AddToScheme(s); err != nil {
-		t.Fatalf("add mustgatherv1alpha1: %v", err)
-	}
-	if err := configv1.AddToScheme(s); err != nil {
-		t.Fatalf("add configv1: %v", err)
-	}
-
-	inner := fake.NewClientBuilder().WithScheme(s).WithObjects(mg, job, cv).WithStatusSubresource(mg).Build()
-	wrapped := failingStatusClient{Client: inner}
-	r := &MustGatherReconciler{ReconcilerBase: util.NewReconcilerBase(wrapped, s, &rest.Config{}, &record.FakeRecorder{}, nil)}
-
-	res, err := r.Reconcile(context.TODO(), reconcile.Request{NamespacedName: types.NamespacedName{Name: mg.Name, Namespace: mg.Namespace}})
-	_ = res
-	if err == nil {
-		t.Fatalf("expected error from status update failure, got nil")
-	}
-}
-
-func TestReconcile_JobFailed_StatusUpdateFails(t *testing.T) {
-	t.Setenv("OPERATOR_IMAGE", "quay.io/openshift/must-gather-operator:latest")
-
-	mg := &mustgatherv1alpha1.MustGather{ObjectMeta: metav1.ObjectMeta{Name: "test-must-gather", Namespace: "must-gather-operator", Finalizers: []string{mustGatherFinalizer}}, Spec: mustgatherv1alpha1.MustGatherSpec{CaseID: "01234567", CaseManagementAccountSecretRef: corev1.LocalObjectReference{Name: "case-management-creds"}, ServiceAccountRef: corev1.LocalObjectReference{Name: "default"}}}
-	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: mg.Name, Namespace: mg.Namespace}, Status: batchv1.JobStatus{Failed: 1}}
-	cv := &configv1.ClusterVersion{ObjectMeta: metav1.ObjectMeta{Name: "version"}, Status: configv1.ClusterVersionStatus{History: []configv1.UpdateHistory{{State: "Completed", Version: "1.2.3"}}}}
-
-	s := runtime.NewScheme()
-	if err := corev1.AddToScheme(s); err != nil {
-		t.Fatalf("add corev1: %v", err)
-	}
-	if err := batchv1.AddToScheme(s); err != nil {
-		t.Fatalf("add batchv1: %v", err)
-	}
-	if err := mustgatherv1alpha1.AddToScheme(s); err != nil {
-		t.Fatalf("add mustgatherv1alpha1: %v", err)
-	}
-	if err := configv1.AddToScheme(s); err != nil {
-		t.Fatalf("add configv1: %v", err)
-	}
-
-	inner := fake.NewClientBuilder().WithScheme(s).WithObjects(mg, job, cv).WithStatusSubresource(mg).Build()
-	wrapped := failingStatusClient{Client: inner}
-	r := &MustGatherReconciler{ReconcilerBase: util.NewReconcilerBase(wrapped, s, &rest.Config{}, &record.FakeRecorder{}, nil)}
-
-	res, err := r.Reconcile(context.TODO(), reconcile.Request{NamespacedName: types.NamespacedName{Name: mg.Name, Namespace: mg.Namespace}})
-	_ = res
-	if err == nil {
-		t.Fatalf("expected error from status update failure, got nil")
-	}
-}
-
 // interceptClient allows injecting failures for specific CRUD operations
 type interceptClient struct {
 	client.Client
@@ -282,6 +127,7 @@ type interceptClient struct {
 	onList   func(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error
 	onDelete func(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error
 	onUpdate func(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error
+	onCreate func(ctx context.Context, obj client.Object, opts ...client.CreateOption) error
 	status   client.StatusWriter
 }
 
@@ -317,6 +163,14 @@ func (c interceptClient) Update(ctx context.Context, obj client.Object, opts ...
 	}
 	return c.Client.Update(ctx, obj, opts...)
 }
+func (c interceptClient) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
+	if c.onCreate != nil {
+		if err := c.onCreate(ctx, obj, opts...); err != nil {
+			return err
+		}
+	}
+	return c.Client.Create(ctx, obj, opts...)
+}
 func (c interceptClient) Status() client.StatusWriter {
 	if c.status != nil {
 		return c.status
@@ -324,578 +178,1118 @@ func (c interceptClient) Status() client.StatusWriter {
 	return c.Client.Status()
 }
 
-// ===================== cleanupMustGatherResources tests =====================
+// failingStatusWriter wraps a client.StatusWriter and forces Status().Update to return an error
+type failingStatusWriter struct{ client.StatusWriter }
 
-func TestCleanupResources_AllDeletedSuccessfully(t *testing.T) {
-	// Arrange
+func (w failingStatusWriter) Update(ctx context.Context, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+	return errors.New("forced status update error")
+}
+
+func TestCleanupMustGatherResources(t *testing.T) {
 	operatorNs := "must-gather-operator"
-	secretName := "case-management-creds"
-	mg := &mustgatherv1alpha1.MustGather{ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: operatorNs}, Spec: mustgatherv1alpha1.MustGatherSpec{CaseManagementAccountSecretRef: corev1.LocalObjectReference{Name: secretName}}}
-	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: operatorNs}}
-	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: mg.Name, Namespace: operatorNs, UID: "abc-123"}}
-	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "p1", Namespace: operatorNs, Labels: map[string]string{"controller-uid": string(job.UID)}}}
 
-	s := runtime.NewScheme()
-	_ = corev1.AddToScheme(s)
-	_ = batchv1.AddToScheme(s)
-	_ = mustgatherv1alpha1.AddToScheme(s)
-	cl := fake.NewClientBuilder().WithScheme(s).WithObjects(mg, secret, job, pod).Build()
-	r := &MustGatherReconciler{ReconcilerBase: util.NewReconcilerBase(cl, s, &rest.Config{}, &record.FakeRecorder{}, nil)}
-
-	// Act
-	err := r.cleanupMustGatherResources(logf.Log, mg, operatorNs)
-
-	// Assert
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	chkSecret := &corev1.Secret{}
-	if getErr := cl.Get(context.TODO(), types.NamespacedName{Namespace: operatorNs, Name: secretName}, chkSecret); getErr == nil {
-		t.Fatalf("expected secret to be deleted")
-	}
-	chkJob := &batchv1.Job{}
-	if getErr := cl.Get(context.TODO(), types.NamespacedName{Namespace: operatorNs, Name: job.Name}, chkJob); getErr == nil {
-		t.Fatalf("expected job to be deleted")
-	}
-}
-
-func TestCleanupResources_SecretNotFound_Continues(t *testing.T) {
-	operatorNs := "must-gather-operator"
-	mg := &mustgatherv1alpha1.MustGather{ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: operatorNs}, Spec: mustgatherv1alpha1.MustGatherSpec{CaseManagementAccountSecretRef: corev1.LocalObjectReference{Name: "missing"}}}
-	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: mg.Name, Namespace: operatorNs}}
-
-	s := runtime.NewScheme()
-	_ = corev1.AddToScheme(s)
-	_ = batchv1.AddToScheme(s)
-	_ = mustgatherv1alpha1.AddToScheme(s)
-	cl := fake.NewClientBuilder().WithScheme(s).WithObjects(mg, job).Build()
-	r := &MustGatherReconciler{ReconcilerBase: util.NewReconcilerBase(cl, s, &rest.Config{}, &record.FakeRecorder{}, nil)}
-	if err := r.cleanupMustGatherResources(logf.Log, mg, operatorNs); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestCleanupResources_SecretGetError_ContinuesAndCleansJob(t *testing.T) {
-	operatorNs := "must-gather-operator"
-	mg := &mustgatherv1alpha1.MustGather{ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: operatorNs}, Spec: mustgatherv1alpha1.MustGatherSpec{CaseManagementAccountSecretRef: corev1.LocalObjectReference{Name: "s"}}}
-	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: mg.Name, Namespace: operatorNs, UID: "u1"}}
-
-	s := runtime.NewScheme()
-	_ = corev1.AddToScheme(s)
-	_ = batchv1.AddToScheme(s)
-	_ = mustgatherv1alpha1.AddToScheme(s)
-	base := fake.NewClientBuilder().WithScheme(s).WithObjects(mg, job).Build()
-	wrap := interceptClient{Client: base, onGet: func(ctx context.Context, key client.ObjectKey, obj client.Object) error {
-		if _, ok := obj.(*corev1.Secret); ok && key.Name == "s" {
-			return errors.New("boom secret get")
-		}
-		return nil
-	}}
-	r := &MustGatherReconciler{ReconcilerBase: util.NewReconcilerBase(wrap, s, &rest.Config{}, &record.FakeRecorder{}, nil)}
-	if err := r.cleanupMustGatherResources(logf.Log, mg, operatorNs); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	// job should be deleted since no pods exist
-	chk := &batchv1.Job{}
-	if e := base.Get(context.TODO(), types.NamespacedName{Namespace: operatorNs, Name: job.Name}, chk); e == nil {
-		t.Fatalf("expected job to be deleted")
-	}
-}
-
-func TestCleanupResources_SecretDeleteError_ReturnsError(t *testing.T) {
-	operatorNs := "must-gather-operator"
-	mg := &mustgatherv1alpha1.MustGather{ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: operatorNs}, Spec: mustgatherv1alpha1.MustGatherSpec{CaseManagementAccountSecretRef: corev1.LocalObjectReference{Name: "s"}}}
-	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "s", Namespace: operatorNs}}
-
-	s := runtime.NewScheme()
-	_ = corev1.AddToScheme(s)
-	_ = mustgatherv1alpha1.AddToScheme(s)
-	base := fake.NewClientBuilder().WithScheme(s).WithObjects(mg, secret).Build()
-	wrap := interceptClient{Client: base, onDelete: func(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error {
-		if _, ok := obj.(*corev1.Secret); ok {
-			return errors.New("boom secret delete")
-		}
-		return nil
-	}}
-	r := &MustGatherReconciler{ReconcilerBase: util.NewReconcilerBase(wrap, s, &rest.Config{}, &record.FakeRecorder{}, nil)}
-	if err := r.cleanupMustGatherResources(logf.Log, mg, operatorNs); err == nil {
-		t.Fatalf("expected error")
-	}
-}
-
-func TestCleanupResources_JobNotFound_Continues(t *testing.T) {
-	operatorNs := "must-gather-operator"
-	mg := &mustgatherv1alpha1.MustGather{ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: operatorNs}, Spec: mustgatherv1alpha1.MustGatherSpec{CaseManagementAccountSecretRef: corev1.LocalObjectReference{Name: "s"}}}
-
-	s := runtime.NewScheme()
-	_ = corev1.AddToScheme(s)
-	_ = batchv1.AddToScheme(s)
-	_ = mustgatherv1alpha1.AddToScheme(s)
-	cl := fake.NewClientBuilder().WithScheme(s).WithObjects(mg).Build()
-	r := &MustGatherReconciler{ReconcilerBase: util.NewReconcilerBase(cl, s, &rest.Config{}, &record.FakeRecorder{}, nil)}
-	if err := r.cleanupMustGatherResources(logf.Log, mg, operatorNs); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestCleanupResources_JobGetError_Continues(t *testing.T) {
-	operatorNs := "must-gather-operator"
-	mg := &mustgatherv1alpha1.MustGather{ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: operatorNs}, Spec: mustgatherv1alpha1.MustGatherSpec{CaseManagementAccountSecretRef: corev1.LocalObjectReference{Name: "s"}}}
-
-	s := runtime.NewScheme()
-	_ = corev1.AddToScheme(s)
-	_ = batchv1.AddToScheme(s)
-	_ = mustgatherv1alpha1.AddToScheme(s)
-	base := fake.NewClientBuilder().WithScheme(s).WithObjects(mg).Build()
-	wrap := interceptClient{Client: base, onGet: func(ctx context.Context, key client.ObjectKey, obj client.Object) error {
-		if _, ok := obj.(*batchv1.Job); ok && key.Name == mg.Name {
-			return errors.New("boom job get")
-		}
-		return nil
-	}}
-	r := &MustGatherReconciler{ReconcilerBase: util.NewReconcilerBase(wrap, s, &rest.Config{}, &record.FakeRecorder{}, nil)}
-	if err := r.cleanupMustGatherResources(logf.Log, mg, operatorNs); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestCleanupResources_PodListError_LeavesJob(t *testing.T) {
-	operatorNs := "must-gather-operator"
-	mg := &mustgatherv1alpha1.MustGather{ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: operatorNs}, Spec: mustgatherv1alpha1.MustGatherSpec{CaseManagementAccountSecretRef: corev1.LocalObjectReference{Name: "s"}}}
-	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: mg.Name, Namespace: operatorNs, UID: "u"}}
-
-	s := runtime.NewScheme()
-	_ = corev1.AddToScheme(s)
-	_ = batchv1.AddToScheme(s)
-	_ = mustgatherv1alpha1.AddToScheme(s)
-	base := fake.NewClientBuilder().WithScheme(s).WithObjects(mg, job).Build()
-	wrap := interceptClient{Client: base, onList: func(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
-		if _, ok := list.(*corev1.PodList); ok {
-			return errors.New("boom list pods")
-		}
-		return nil
-	}}
-	r := &MustGatherReconciler{ReconcilerBase: util.NewReconcilerBase(wrap, s, &rest.Config{}, &record.FakeRecorder{}, nil)}
-	if err := r.cleanupMustGatherResources(logf.Log, mg, operatorNs); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	// job should still exist
-	chk := &batchv1.Job{}
-	if e := base.Get(context.TODO(), types.NamespacedName{Namespace: operatorNs, Name: job.Name}, chk); e != nil {
-		t.Fatalf("expected job to remain, get err: %v", e)
-	}
-}
-
-func TestCleanupResources_PodDeleteError_ReturnsError(t *testing.T) {
-	operatorNs := "must-gather-operator"
-	mg := &mustgatherv1alpha1.MustGather{ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: operatorNs}, Spec: mustgatherv1alpha1.MustGatherSpec{CaseManagementAccountSecretRef: corev1.LocalObjectReference{Name: "s"}}}
-	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: mg.Name, Namespace: operatorNs, UID: "u"}}
-	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "p1", Namespace: operatorNs, Labels: map[string]string{"controller-uid": string(job.UID)}}}
-
-	s := runtime.NewScheme()
-	_ = corev1.AddToScheme(s)
-	_ = batchv1.AddToScheme(s)
-	_ = mustgatherv1alpha1.AddToScheme(s)
-	base := fake.NewClientBuilder().WithScheme(s).WithObjects(mg, job, pod).Build()
-	wrap := interceptClient{Client: base, onDelete: func(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error {
-		if _, ok := obj.(*corev1.Pod); ok {
-			return errors.New("boom pod delete")
-		}
-		return nil
-	}}
-	r := &MustGatherReconciler{ReconcilerBase: util.NewReconcilerBase(wrap, s, &rest.Config{}, &record.FakeRecorder{}, nil)}
-	if err := r.cleanupMustGatherResources(logf.Log, mg, operatorNs); err == nil {
-		t.Fatalf("expected error")
-	}
-}
-
-func TestCleanupResources_JobDeleteError_ReturnsError(t *testing.T) {
-	operatorNs := "must-gather-operator"
-	mg := &mustgatherv1alpha1.MustGather{ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: operatorNs}, Spec: mustgatherv1alpha1.MustGatherSpec{CaseManagementAccountSecretRef: corev1.LocalObjectReference{Name: "s"}}}
-	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: mg.Name, Namespace: operatorNs, UID: "u"}}
-
-	s := runtime.NewScheme()
-	_ = corev1.AddToScheme(s)
-	_ = batchv1.AddToScheme(s)
-	_ = mustgatherv1alpha1.AddToScheme(s)
-	base := fake.NewClientBuilder().WithScheme(s).WithObjects(mg, job).Build()
-	wrap := interceptClient{Client: base, onDelete: func(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error {
-		if _, ok := obj.(*batchv1.Job); ok {
-			return errors.New("boom job delete")
-		}
-		return nil
-	}}
-	r := &MustGatherReconciler{ReconcilerBase: util.NewReconcilerBase(wrap, s, &rest.Config{}, &record.FakeRecorder{}, nil)}
-	if err := r.cleanupMustGatherResources(logf.Log, mg, operatorNs); err == nil {
-		t.Fatalf("expected error")
-	}
-}
-
-// ===================== Additional Reconcile scenario tests =====================
-
-func TestReconcile_GetMustGather_NotFound(t *testing.T) {
-	s := runtime.NewScheme()
-	_ = mustgatherv1alpha1.AddToScheme(s)
-	r := &MustGatherReconciler{ReconcilerBase: util.NewReconcilerBase(fake.NewClientBuilder().WithScheme(s).Build(), s, &rest.Config{}, &record.FakeRecorder{}, nil)}
-	res, err := r.Reconcile(context.TODO(), reconcile.Request{NamespacedName: types.NamespacedName{Name: "x", Namespace: "y"}})
-	if err != nil || res != (reconcile.Result{}) {
-		t.Fatalf("expected no error and empty result; got %v %v", res, err)
-	}
-}
-
-func TestReconcile_GetMustGather_Error(t *testing.T) {
-	s := runtime.NewScheme()
-	_ = mustgatherv1alpha1.AddToScheme(s)
-	base := fake.NewClientBuilder().WithScheme(s).Build()
-	wrap := interceptClient{Client: base, onGet: func(ctx context.Context, key client.ObjectKey, obj client.Object) error {
-		if _, ok := obj.(*mustgatherv1alpha1.MustGather); ok {
-			return errors.New("boom get mg")
-		}
-		return base.Get(ctx, key, obj)
-	}}
-	r := &MustGatherReconciler{ReconcilerBase: util.NewReconcilerBase(wrap, s, &rest.Config{}, &record.FakeRecorder{}, nil)}
-	_, err := r.Reconcile(context.TODO(), reconcile.Request{NamespacedName: types.NamespacedName{Name: "x", Namespace: "y"}})
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-}
-
-func TestReconcile_IsInitialized_UpdateSucceeds(t *testing.T) {
-	s := runtime.NewScheme()
-	_ = mustgatherv1alpha1.AddToScheme(s)
-	mg := &mustgatherv1alpha1.MustGather{ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: "ns"}}
-	cl := fake.NewClientBuilder().WithScheme(s).WithObjects(mg).Build()
-	r := &MustGatherReconciler{ReconcilerBase: util.NewReconcilerBase(cl, s, &rest.Config{}, &record.FakeRecorder{}, nil)}
-	_, err := r.Reconcile(context.TODO(), reconcile.Request{NamespacedName: types.NamespacedName{Name: mg.Name, Namespace: mg.Namespace}})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestReconcile_IsInitialized_UpdateFails(t *testing.T) {
-	s := runtime.NewScheme()
-	_ = mustgatherv1alpha1.AddToScheme(s)
-	mg := &mustgatherv1alpha1.MustGather{ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: "ns"}}
-	base := fake.NewClientBuilder().WithScheme(s).WithObjects(mg).Build()
-	wrap := interceptClient{Client: base, onUpdate: func(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
-		if _, ok := obj.(*mustgatherv1alpha1.MustGather); ok {
-			return errors.New("boom update mg")
-		}
-		return base.Update(ctx, obj, opts...)
-	}}
-	r := &MustGatherReconciler{ReconcilerBase: util.NewReconcilerBase(wrap, s, &rest.Config{}, &record.FakeRecorder{}, nil)}
-	_, err := r.Reconcile(context.TODO(), reconcile.Request{NamespacedName: types.NamespacedName{Name: mg.Name, Namespace: mg.Namespace}})
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-}
-
-func TestReconcile_DeletionTimestamp_Finalizer_KeepOrCleanup(t *testing.T) {
-	// Will exercise deletion with cleanup and finalizer removal
-	s := runtime.NewScheme()
-	_ = corev1.AddToScheme(s)
-	_ = batchv1.AddToScheme(s)
-	_ = mustgatherv1alpha1.AddToScheme(s)
-	operatorNs := "must-gather-operator"
-	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "s", Namespace: operatorNs}}
-	mg := &mustgatherv1alpha1.MustGather{ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: operatorNs, Finalizers: []string{mustGatherFinalizer}, DeletionTimestamp: &metav1.Time{Time: time.Now()}}, Spec: mustgatherv1alpha1.MustGatherSpec{CaseManagementAccountSecretRef: corev1.LocalObjectReference{Name: "s"}, ServiceAccountRef: corev1.LocalObjectReference{Name: "default"}}}
-	cl := fake.NewClientBuilder().WithScheme(s).WithObjects(mg, secret).Build()
-	r := &MustGatherReconciler{ReconcilerBase: util.NewReconcilerBase(cl, s, &rest.Config{}, &record.FakeRecorder{}, nil)}
-	_, err := r.Reconcile(context.TODO(), reconcile.Request{NamespacedName: types.NamespacedName{Name: mg.Name, Namespace: mg.Namespace}})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	// finalizer should be removed
-	out := &mustgatherv1alpha1.MustGather{}
-	_ = cl.Get(context.TODO(), types.NamespacedName{Name: mg.Name, Namespace: mg.Namespace}, out)
-	if contains(out.GetFinalizers(), mustGatherFinalizer) {
-		t.Fatalf("expected finalizer removed")
-	}
-}
-
-func TestReconcile_DeletionTimestamp_CleanupError_ReturnsError(t *testing.T) {
-	// Force local run mode so operator namespace defaults to must-gather-operator in CI
-	t.Setenv("OSDK_FORCE_RUN_MODE", "local")
-	s := runtime.NewScheme()
-	_ = corev1.AddToScheme(s)
-	_ = mustgatherv1alpha1.AddToScheme(s)
-	operatorNs := "must-gather-operator"
-	mg := &mustgatherv1alpha1.MustGather{ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: operatorNs, Finalizers: []string{mustGatherFinalizer}, DeletionTimestamp: &metav1.Time{Time: time.Now()}}, Spec: mustgatherv1alpha1.MustGatherSpec{CaseManagementAccountSecretRef: corev1.LocalObjectReference{Name: "s"}, ServiceAccountRef: corev1.LocalObjectReference{Name: "default"}}}
-	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "s", Namespace: operatorNs}}
-	base := fake.NewClientBuilder().WithScheme(s).WithObjects(mg, secret).Build()
-	wrap := interceptClient{Client: base, onDelete: func(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error {
-		if _, ok := obj.(*corev1.Secret); ok {
-			return errors.New("boom secret delete")
-		}
-		return nil
-	}}
-	r := &MustGatherReconciler{ReconcilerBase: util.NewReconcilerBase(wrap, s, &rest.Config{}, &record.FakeRecorder{}, nil)}
-	_, err := r.Reconcile(context.TODO(), reconcile.Request{NamespacedName: types.NamespacedName{Name: mg.Name, Namespace: mg.Namespace}})
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-}
-
-func TestReconcile_AddFinalizer_UpdateFails(t *testing.T) {
-	s := runtime.NewScheme()
-	_ = mustgatherv1alpha1.AddToScheme(s)
-	mg := &mustgatherv1alpha1.MustGather{ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: "ns"}}
-	base := fake.NewClientBuilder().WithScheme(s).WithObjects(mg).Build()
-	wrap := interceptClient{Client: base, onUpdate: func(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
-		if _, ok := obj.(*mustgatherv1alpha1.MustGather); ok {
-			return errors.New("boom add finalizer")
-		}
-		return base.Update(ctx, obj, opts...)
-	}}
-	r := &MustGatherReconciler{ReconcilerBase: util.NewReconcilerBase(wrap, s, &rest.Config{}, &record.FakeRecorder{}, nil)}
-	_, err := r.Reconcile(context.TODO(), reconcile.Request{NamespacedName: types.NamespacedName{Name: mg.Name, Namespace: mg.Namespace}})
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-}
-
-func TestReconcile_GetJobFromInstance_EnvMissing_ReturnsError(t *testing.T) {
-	osUnset := os.Getenv("OPERATOR_IMAGE")
-	_ = os.Unsetenv("OPERATOR_IMAGE")
-	defer os.Setenv("OPERATOR_IMAGE", osUnset)
-	s := runtime.NewScheme()
-	_ = mustgatherv1alpha1.AddToScheme(s)
-	mg := &mustgatherv1alpha1.MustGather{ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: "ns"}, Spec: mustgatherv1alpha1.MustGatherSpec{ServiceAccountRef: corev1.LocalObjectReference{Name: "default"}}}
-	cl := fake.NewClientBuilder().WithScheme(s).WithObjects(mg).Build()
-	r := &MustGatherReconciler{ReconcilerBase: util.NewReconcilerBase(cl, s, &rest.Config{}, &record.FakeRecorder{}, nil)}
-	_, err := r.Reconcile(context.TODO(), reconcile.Request{NamespacedName: types.NamespacedName{Name: mg.Name, Namespace: mg.Namespace}})
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-}
-
-func TestReconcile_GetJobFromInstance_ClusterVersionMissing_ReturnsError(t *testing.T) {
-	os.Setenv("OPERATOR_IMAGE", "img")
-	s := runtime.NewScheme()
-	_ = mustgatherv1alpha1.AddToScheme(s)
-	mg := &mustgatherv1alpha1.MustGather{ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: "ns"}, Spec: mustgatherv1alpha1.MustGatherSpec{ServiceAccountRef: corev1.LocalObjectReference{Name: "default"}}}
-	cl := fake.NewClientBuilder().WithScheme(s).WithObjects(mg).Build()
-	r := &MustGatherReconciler{ReconcilerBase: util.NewReconcilerBase(cl, s, &rest.Config{}, &record.FakeRecorder{}, nil)}
-	_, err := r.Reconcile(context.TODO(), reconcile.Request{NamespacedName: types.NamespacedName{Name: mg.Name, Namespace: mg.Namespace}})
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-}
-
-func TestReconcile_JobNotFound_UserSecretError(t *testing.T) {
-	os.Setenv("OPERATOR_IMAGE", "img")
-	s := runtime.NewScheme()
-	_ = corev1.AddToScheme(s)
-	_ = mustgatherv1alpha1.AddToScheme(s)
-	_ = configv1.AddToScheme(s)
-	mg := &mustgatherv1alpha1.MustGather{ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: "ns", Finalizers: []string{mustGatherFinalizer}}, Spec: mustgatherv1alpha1.MustGatherSpec{CaseManagementAccountSecretRef: corev1.LocalObjectReference{Name: "sec"}, ServiceAccountRef: corev1.LocalObjectReference{Name: "default"}}}
-	// Provide ClusterVersion for job template
-	cv := &configv1.ClusterVersion{ObjectMeta: metav1.ObjectMeta{Name: "version"}, Status: configv1.ClusterVersionStatus{History: []configv1.UpdateHistory{{State: "Completed", Version: "1.2.3"}}}}
-	cl := fake.NewClientBuilder().WithScheme(s).WithObjects(mg, cv).Build()
-	r := &MustGatherReconciler{ReconcilerBase: util.NewReconcilerBase(cl, s, &rest.Config{}, &record.FakeRecorder{}, nil)}
-	_, err := r.Reconcile(context.TODO(), reconcile.Request{NamespacedName: types.NamespacedName{Name: mg.Name, Namespace: mg.Namespace}})
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-}
-
-func TestReconcile_JobNotFound_NewSecretGetOtherError(t *testing.T) {
-	os.Setenv("OPERATOR_IMAGE", "img")
-	s := runtime.NewScheme()
-	_ = corev1.AddToScheme(s)
-	_ = mustgatherv1alpha1.AddToScheme(s)
-	_ = configv1.AddToScheme(s)
-	mg := &mustgatherv1alpha1.MustGather{ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: "ns", Finalizers: []string{mustGatherFinalizer}}, Spec: mustgatherv1alpha1.MustGatherSpec{CaseManagementAccountSecretRef: corev1.LocalObjectReference{Name: "sec"}, ServiceAccountRef: corev1.LocalObjectReference{Name: "default"}}}
-	userSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "sec", Namespace: mg.Namespace}}
-	cv := &configv1.ClusterVersion{ObjectMeta: metav1.ObjectMeta{Name: "version"}, Status: configv1.ClusterVersionStatus{History: []configv1.UpdateHistory{{State: "Completed", Version: "1.2.3"}}}}
-	base := fake.NewClientBuilder().WithScheme(s).WithObjects(mg, userSecret, cv).Build()
-	wrap := interceptClient{Client: base, onGet: func(ctx context.Context, key client.ObjectKey, obj client.Object) error {
-		if _, ok := obj.(*corev1.Secret); ok && key.Namespace == defaultMustGatherNamespace && key.Name == "sec" {
-			return errors.New("boom newSecret get")
-		}
-		return nil
-	}}
-	r := &MustGatherReconciler{ReconcilerBase: util.NewReconcilerBase(wrap, s, &rest.Config{}, &record.FakeRecorder{}, nil)}
-	_, err := r.Reconcile(context.TODO(), reconcile.Request{NamespacedName: types.NamespacedName{Name: mg.Name, Namespace: mg.Namespace}})
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-}
-
-func TestReconcile_JobActive_CallsUpdateStatus(t *testing.T) {
-	os.Setenv("OPERATOR_IMAGE", "img")
-	s := runtime.NewScheme()
-	_ = corev1.AddToScheme(s)
-	_ = batchv1.AddToScheme(s)
-	_ = mustgatherv1alpha1.AddToScheme(s)
-	_ = configv1.AddToScheme(s)
-	mg := &mustgatherv1alpha1.MustGather{ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: "ns", Finalizers: []string{mustGatherFinalizer}}, Spec: mustgatherv1alpha1.MustGatherSpec{CaseManagementAccountSecretRef: corev1.LocalObjectReference{Name: "sec"}, ServiceAccountRef: corev1.LocalObjectReference{Name: "default"}}}
-	userSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "sec", Namespace: mg.Namespace}}
-	// Have ClusterVersion for template
-	cv := &configv1.ClusterVersion{ObjectMeta: metav1.ObjectMeta{Name: "version"}, Status: configv1.ClusterVersionStatus{History: []configv1.UpdateHistory{{State: "Completed", Version: "1.2.3"}}}}
-	// Pre-create a Job with Active>0 so Get(job1) succeeds
-	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: mg.Name, Namespace: mg.Namespace}}
-	job.Status.Active = 1
-	cl := fake.NewClientBuilder().WithScheme(s).WithObjects(mg, userSecret, cv, job).WithStatusSubresource(mg).Build()
-	r := &MustGatherReconciler{ReconcilerBase: util.NewReconcilerBase(cl, s, &rest.Config{}, &record.FakeRecorder{}, nil)}
-	_, err := r.Reconcile(context.TODO(), reconcile.Request{NamespacedName: types.NamespacedName{Name: mg.Name, Namespace: mg.Namespace}})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestReconcile_Succeeded_RetainTrue_NoCleanup(t *testing.T) {
-	os.Setenv("OPERATOR_IMAGE", "img")
-	s := runtime.NewScheme()
-	_ = corev1.AddToScheme(s)
-	_ = batchv1.AddToScheme(s)
-	_ = mustgatherv1alpha1.AddToScheme(s)
-	_ = configv1.AddToScheme(s)
-	operatorNs := "must-gather-operator"
-	mg := &mustgatherv1alpha1.MustGather{ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: operatorNs, Finalizers: []string{mustGatherFinalizer}}, Spec: mustgatherv1alpha1.MustGatherSpec{CaseManagementAccountSecretRef: corev1.LocalObjectReference{Name: "sec"}, ServiceAccountRef: corev1.LocalObjectReference{Name: "default"}, InternalUser: true}}
-	mg.Spec.RetainResourcesOnCompletion = true
-	userSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "sec", Namespace: operatorNs}}
-	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: mg.Name, Namespace: operatorNs}}
-	job.Status.Succeeded = 1
-	cv := &configv1.ClusterVersion{ObjectMeta: metav1.ObjectMeta{Name: "version"}, Status: configv1.ClusterVersionStatus{History: []configv1.UpdateHistory{{State: "Completed", Version: "1.2.3"}}}}
-	cl := fake.NewClientBuilder().WithScheme(s).WithObjects(mg, userSecret, cv, job).WithStatusSubresource(mg).Build()
-	r := &MustGatherReconciler{ReconcilerBase: util.NewReconcilerBase(cl, s, &rest.Config{}, &record.FakeRecorder{}, nil)}
-	_, err := r.Reconcile(context.TODO(), reconcile.Request{NamespacedName: types.NamespacedName{Name: mg.Name, Namespace: mg.Namespace}})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	// verify job still exists
-	chk := &batchv1.Job{}
-	if e := cl.Get(context.TODO(), types.NamespacedName{Namespace: operatorNs, Name: mg.Name}, chk); e != nil {
-		t.Fatalf("expected job to remain, err: %v", e)
-	}
-}
-
-func TestReconcile_Succeeded_CleanupError_ReturnsError(t *testing.T) {
-	// Force local run mode so operator namespace defaults to must-gather-operator in CI
-	t.Setenv("OSDK_FORCE_RUN_MODE", "local")
-	os.Setenv("OPERATOR_IMAGE", "img")
-	s := runtime.NewScheme()
-	_ = corev1.AddToScheme(s)
-	_ = batchv1.AddToScheme(s)
-	_ = mustgatherv1alpha1.AddToScheme(s)
-	_ = configv1.AddToScheme(s)
-	operatorNs := "must-gather-operator"
-	mg := &mustgatherv1alpha1.MustGather{ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: operatorNs, Finalizers: []string{mustGatherFinalizer}}, Spec: mustgatherv1alpha1.MustGatherSpec{CaseManagementAccountSecretRef: corev1.LocalObjectReference{Name: "sec"}, ServiceAccountRef: corev1.LocalObjectReference{Name: "default"}}}
-	userSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "sec", Namespace: operatorNs}}
-	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: mg.Name, Namespace: operatorNs}}
-	job.Status.Succeeded = 1
-	cv := &configv1.ClusterVersion{ObjectMeta: metav1.ObjectMeta{Name: "version"}, Status: configv1.ClusterVersionStatus{History: []configv1.UpdateHistory{{State: "Completed", Version: "1.2.3"}}}}
-	base := fake.NewClientBuilder().WithScheme(s).WithObjects(mg, userSecret, cv, job).WithStatusSubresource(mg).Build()
-	wrap := interceptClient{Client: base, onDelete: func(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error {
-		if _, ok := obj.(*batchv1.Job); ok {
-			return errors.New("boom job delete")
-		}
-		return nil
-	}}
-	r := &MustGatherReconciler{ReconcilerBase: util.NewReconcilerBase(wrap, s, &rest.Config{}, &record.FakeRecorder{}, nil)}
-	_, err := r.Reconcile(context.TODO(), reconcile.Request{NamespacedName: types.NamespacedName{Name: mg.Name, Namespace: mg.Namespace}})
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-}
-
-func TestReconcile_Failed_CleanupError_ReturnsError(t *testing.T) {
-	// Force local run mode so operator namespace defaults to must-gather-operator in CI
-	t.Setenv("OSDK_FORCE_RUN_MODE", "local")
-	os.Setenv("OPERATOR_IMAGE", "img")
-	s := runtime.NewScheme()
-	_ = corev1.AddToScheme(s)
-	_ = batchv1.AddToScheme(s)
-	_ = mustgatherv1alpha1.AddToScheme(s)
-	_ = configv1.AddToScheme(s)
-	operatorNs := "must-gather-operator"
-	mg := &mustgatherv1alpha1.MustGather{ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: operatorNs, Finalizers: []string{mustGatherFinalizer}}, Spec: mustgatherv1alpha1.MustGatherSpec{CaseManagementAccountSecretRef: corev1.LocalObjectReference{Name: "sec"}, ServiceAccountRef: corev1.LocalObjectReference{Name: "default"}}}
-	userSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "sec", Namespace: operatorNs}}
-	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: mg.Name, Namespace: operatorNs}}
-	job.Status.Failed = 1
-	cv := &configv1.ClusterVersion{ObjectMeta: metav1.ObjectMeta{Name: "version"}, Status: configv1.ClusterVersionStatus{History: []configv1.UpdateHistory{{State: "Completed", Version: "1.2.3"}}}}
-	base := fake.NewClientBuilder().WithScheme(s).WithObjects(mg, userSecret, cv, job).WithStatusSubresource(mg).Build()
-	wrap := interceptClient{Client: base, onDelete: func(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error {
-		if _, ok := obj.(*corev1.Secret); ok {
-			return errors.New("boom secret delete")
-		}
-		return nil
-	}}
-	r := &MustGatherReconciler{ReconcilerBase: util.NewReconcilerBase(wrap, s, &rest.Config{}, &record.FakeRecorder{}, nil)}
-	_, err := r.Reconcile(context.TODO(), reconcile.Request{NamespacedName: types.NamespacedName{Name: mg.Name, Namespace: mg.Namespace}})
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-}
-
-func TestReconcile_NoActiveNoTerminal_CallsUpdateStatus(t *testing.T) {
-	os.Setenv("OPERATOR_IMAGE", "img")
-	s := runtime.NewScheme()
-	_ = corev1.AddToScheme(s)
-	_ = batchv1.AddToScheme(s)
-	_ = mustgatherv1alpha1.AddToScheme(s)
-	_ = configv1.AddToScheme(s)
-	mg := &mustgatherv1alpha1.MustGather{ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: "ns", Finalizers: []string{mustGatherFinalizer}}, Spec: mustgatherv1alpha1.MustGatherSpec{CaseManagementAccountSecretRef: corev1.LocalObjectReference{Name: "sec"}, ServiceAccountRef: corev1.LocalObjectReference{Name: "default"}}}
-	userSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "sec", Namespace: mg.Namespace}}
-	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: mg.Name, Namespace: mg.Namespace}}
-	// completion time set -> updateStatus should set Completed=true
-	ct := metav1.NewTime(time.Now())
-	job.Status.CompletionTime = &ct
-	cv := &configv1.ClusterVersion{ObjectMeta: metav1.ObjectMeta{Name: "version"}, Status: configv1.ClusterVersionStatus{History: []configv1.UpdateHistory{{State: "Completed", Version: "1.2.3"}}}}
-	cl := fake.NewClientBuilder().WithScheme(s).WithObjects(mg, userSecret, cv, job).WithStatusSubresource(mg).Build()
-	r := &MustGatherReconciler{ReconcilerBase: util.NewReconcilerBase(cl, s, &rest.Config{}, &record.FakeRecorder{}, nil)}
-	_, err := r.Reconcile(context.TODO(), reconcile.Request{NamespacedName: types.NamespacedName{Name: mg.Name, Namespace: mg.Namespace}})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	out := &mustgatherv1alpha1.MustGather{}
-	_ = cl.Get(context.TODO(), types.NamespacedName{Name: mg.Name, Namespace: mg.Namespace}, out)
-	if !out.Status.Completed {
-		t.Fatalf("expected Completed=true from updateStatus")
-	}
-}
-
-func TestReconcile_Failed_RetainTrue_NoCleanup(t *testing.T) {
-	os.Setenv("OPERATOR_IMAGE", "img")
-	s := runtime.NewScheme()
-	_ = corev1.AddToScheme(s)
-	_ = batchv1.AddToScheme(s)
-	_ = mustgatherv1alpha1.AddToScheme(s)
-	_ = configv1.AddToScheme(s)
-
-	mg := &mustgatherv1alpha1.MustGather{
-		ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: "ns", Finalizers: []string{mustGatherFinalizer}},
-		Spec: mustgatherv1alpha1.MustGatherSpec{
-			CaseManagementAccountSecretRef: corev1.LocalObjectReference{Name: "sec"},
-			ServiceAccountRef:              corev1.LocalObjectReference{Name: "default"},
+	tests := []struct {
+		name           string
+		setupObjects   func() []client.Object
+		interceptors   func() interceptClient
+		expectError    bool
+		postTestChecks func(t *testing.T, cl client.Client)
+	}{
+		{
+			name: "cleanup_success_all_resources_deleted",
+			setupObjects: func() []client.Object {
+				mg := &mustgatherv1alpha1.MustGather{
+					ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: operatorNs},
+					Spec: mustgatherv1alpha1.MustGatherSpec{
+						CaseManagementAccountSecretRef: corev1.LocalObjectReference{Name: "case-management-creds"},
+					},
+				}
+				secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "case-management-creds", Namespace: operatorNs}}
+				job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: mg.Name, Namespace: operatorNs, UID: "abc-123"}}
+				pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "p1", Namespace: operatorNs, Labels: map[string]string{"controller-uid": string(job.UID)}}}
+				return []client.Object{mg, secret, job, pod}
+			},
+			interceptors: func() interceptClient { return interceptClient{} },
+			expectError:  false,
+			postTestChecks: func(t *testing.T, cl client.Client) {
+				// Verify secret is deleted
+				chkSecret := &corev1.Secret{}
+				if getErr := cl.Get(context.TODO(), types.NamespacedName{Namespace: operatorNs, Name: "case-management-creds"}, chkSecret); getErr == nil {
+					t.Fatalf("expected secret to be deleted")
+				}
+				// Verify job is deleted
+				chkJob := &batchv1.Job{}
+				if getErr := cl.Get(context.TODO(), types.NamespacedName{Namespace: operatorNs, Name: "mg"}, chkJob); getErr == nil {
+					t.Fatalf("expected job to be deleted")
+				}
+			},
+		},
+		{
+			name: "cleanup_secret_not_found_continues_with_job_cleanup",
+			setupObjects: func() []client.Object {
+				mg := &mustgatherv1alpha1.MustGather{
+					ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: operatorNs},
+					Spec: mustgatherv1alpha1.MustGatherSpec{
+						CaseManagementAccountSecretRef: corev1.LocalObjectReference{Name: "missing"},
+					},
+				}
+				job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: mg.Name, Namespace: operatorNs}}
+				return []client.Object{mg, job}
+			},
+			interceptors:   func() interceptClient { return interceptClient{} },
+			expectError:    false,
+			postTestChecks: func(t *testing.T, cl client.Client) {},
+		},
+		{
+			name: "cleanup_secret_get_error_continues_with_job_cleanup",
+			setupObjects: func() []client.Object {
+				mg := &mustgatherv1alpha1.MustGather{
+					ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: operatorNs},
+					Spec: mustgatherv1alpha1.MustGatherSpec{
+						CaseManagementAccountSecretRef: corev1.LocalObjectReference{Name: "s"},
+					},
+				}
+				job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: mg.Name, Namespace: operatorNs, UID: "u1"}}
+				return []client.Object{mg, job}
+			},
+			interceptors: func() interceptClient {
+				return interceptClient{
+					onGet: func(ctx context.Context, key client.ObjectKey, obj client.Object) error {
+						if _, ok := obj.(*corev1.Secret); ok && key.Name == "s" {
+							return errors.New("boom secret get")
+						}
+						return nil
+					},
+				}
+			},
+			expectError: false,
+			postTestChecks: func(t *testing.T, cl client.Client) {
+				// job should be deleted since no pods exist
+				chk := &batchv1.Job{}
+				if e := cl.Get(context.TODO(), types.NamespacedName{Namespace: operatorNs, Name: "mg"}, chk); e == nil {
+					t.Fatalf("expected job to be deleted")
+				}
+			},
+		},
+		{
+			name: "cleanup_secret_delete_error_returns_error",
+			setupObjects: func() []client.Object {
+				mg := &mustgatherv1alpha1.MustGather{
+					ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: operatorNs},
+					Spec: mustgatherv1alpha1.MustGatherSpec{
+						CaseManagementAccountSecretRef: corev1.LocalObjectReference{Name: "s"},
+					},
+				}
+				secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "s", Namespace: operatorNs}}
+				return []client.Object{mg, secret}
+			},
+			interceptors: func() interceptClient {
+				return interceptClient{
+					onDelete: func(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error {
+						if _, ok := obj.(*corev1.Secret); ok {
+							return errors.New("boom secret delete")
+						}
+						return nil
+					},
+				}
+			},
+			expectError:    true,
+			postTestChecks: func(t *testing.T, cl client.Client) {},
+		},
+		{
+			name: "cleanup_job_not_found_continues_successfully",
+			setupObjects: func() []client.Object {
+				mg := &mustgatherv1alpha1.MustGather{
+					ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: operatorNs},
+					Spec: mustgatherv1alpha1.MustGatherSpec{
+						CaseManagementAccountSecretRef: corev1.LocalObjectReference{Name: "s"},
+					},
+				}
+				return []client.Object{mg}
+			},
+			interceptors:   func() interceptClient { return interceptClient{} },
+			expectError:    false,
+			postTestChecks: func(t *testing.T, cl client.Client) {},
+		},
+		{
+			name: "cleanup_job_get_error_continues_successfully",
+			setupObjects: func() []client.Object {
+				mg := &mustgatherv1alpha1.MustGather{
+					ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: operatorNs},
+					Spec: mustgatherv1alpha1.MustGatherSpec{
+						CaseManagementAccountSecretRef: corev1.LocalObjectReference{Name: "s"},
+					},
+				}
+				return []client.Object{mg}
+			},
+			interceptors: func() interceptClient {
+				return interceptClient{
+					onGet: func(ctx context.Context, key client.ObjectKey, obj client.Object) error {
+						if _, ok := obj.(*batchv1.Job); ok && key.Name == "mg" {
+							return errors.New("boom job get")
+						}
+						return nil
+					},
+				}
+			},
+			expectError:    false,
+			postTestChecks: func(t *testing.T, cl client.Client) {},
+		},
+		{
+			name: "cleanup_pod_list_error_leaves_job_intact",
+			setupObjects: func() []client.Object {
+				mg := &mustgatherv1alpha1.MustGather{
+					ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: operatorNs},
+					Spec: mustgatherv1alpha1.MustGatherSpec{
+						CaseManagementAccountSecretRef: corev1.LocalObjectReference{Name: "s"},
+					},
+				}
+				job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: mg.Name, Namespace: operatorNs, UID: "u"}}
+				return []client.Object{mg, job}
+			},
+			interceptors: func() interceptClient {
+				return interceptClient{
+					onList: func(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+						if _, ok := list.(*corev1.PodList); ok {
+							return errors.New("boom list pods")
+						}
+						return nil
+					},
+				}
+			},
+			expectError: false,
+			postTestChecks: func(t *testing.T, cl client.Client) {
+				// job should still exist
+				chk := &batchv1.Job{}
+				if e := cl.Get(context.TODO(), types.NamespacedName{Namespace: operatorNs, Name: "mg"}, chk); e != nil {
+					t.Fatalf("expected job to remain, get err: %v", e)
+				}
+			},
+		},
+		{
+			name: "cleanup_pod_delete_error_returns_error",
+			setupObjects: func() []client.Object {
+				mg := &mustgatherv1alpha1.MustGather{
+					ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: operatorNs},
+					Spec: mustgatherv1alpha1.MustGatherSpec{
+						CaseManagementAccountSecretRef: corev1.LocalObjectReference{Name: "s"},
+					},
+				}
+				job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: mg.Name, Namespace: operatorNs, UID: "u"}}
+				pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "p1", Namespace: operatorNs, Labels: map[string]string{"controller-uid": string(job.UID)}}}
+				return []client.Object{mg, job, pod}
+			},
+			interceptors: func() interceptClient {
+				return interceptClient{
+					onDelete: func(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error {
+						if _, ok := obj.(*corev1.Pod); ok {
+							return errors.New("boom pod delete")
+						}
+						return nil
+					},
+				}
+			},
+			expectError:    true,
+			postTestChecks: func(t *testing.T, cl client.Client) {},
+		},
+		{
+			name: "cleanup_job_delete_error_returns_error",
+			setupObjects: func() []client.Object {
+				mg := &mustgatherv1alpha1.MustGather{
+					ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: operatorNs},
+					Spec: mustgatherv1alpha1.MustGatherSpec{
+						CaseManagementAccountSecretRef: corev1.LocalObjectReference{Name: "s"},
+					},
+				}
+				job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: mg.Name, Namespace: operatorNs, UID: "u"}}
+				return []client.Object{mg, job}
+			},
+			interceptors: func() interceptClient {
+				return interceptClient{
+					onDelete: func(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error {
+						if _, ok := obj.(*batchv1.Job); ok {
+							return errors.New("boom job delete")
+						}
+						return nil
+					},
+				}
+			},
+			expectError:    true,
+			postTestChecks: func(t *testing.T, cl client.Client) {},
 		},
 	}
-	mg.Spec.RetainResourcesOnCompletion = true
 
-	// Pre-create a Job with Failed>0 so Get(job1) succeeds and failed branch is taken
-	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: mg.Name, Namespace: mg.Namespace}}
-	job.Status.Failed = 1
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Setup scheme
+			s := runtime.NewScheme()
+			_ = corev1.AddToScheme(s)
+			_ = batchv1.AddToScheme(s)
+			_ = mustgatherv1alpha1.AddToScheme(s)
 
-	// Provide ClusterVersion for getJobFromInstance
-	cv := &configv1.ClusterVersion{ObjectMeta: metav1.ObjectMeta{Name: "version"}, Status: configv1.ClusterVersionStatus{History: []configv1.UpdateHistory{{State: "Completed", Version: "1.2.3"}}}}
+			// Setup objects and client
+			objects := tt.setupObjects()
+			base := fake.NewClientBuilder().WithScheme(s).WithObjects(objects...).Build()
 
-	cl := fake.NewClientBuilder().WithScheme(s).WithObjects(mg, cv, job).WithStatusSubresource(mg).Build()
-	r := &MustGatherReconciler{ReconcilerBase: util.NewReconcilerBase(cl, s, &rest.Config{}, &record.FakeRecorder{}, nil)}
+			// Setup interceptor if needed
+			interceptor := tt.interceptors()
+			var cl client.Client = base
+			if interceptor.onGet != nil || interceptor.onList != nil || interceptor.onDelete != nil || interceptor.onUpdate != nil || interceptor.onCreate != nil || interceptor.status != nil {
+				interceptor.Client = base
+				cl = interceptor
+			}
 
-	res, err := r.Reconcile(context.TODO(), reconcile.Request{NamespacedName: types.NamespacedName{Name: mg.Name, Namespace: mg.Namespace}})
-	if err != nil {
-		t.Fatalf("unexpected reconcile error: %v", err)
+			// Create reconciler
+			r := &MustGatherReconciler{ReconcilerBase: util.NewReconcilerBase(cl, s, &rest.Config{}, &record.FakeRecorder{}, nil)}
+
+			// Get the MustGather object for the test
+			var mg *mustgatherv1alpha1.MustGather
+			for _, obj := range objects {
+				if mgObj, ok := obj.(*mustgatherv1alpha1.MustGather); ok {
+					mg = mgObj
+					break
+				}
+			}
+
+			// Execute
+			err := r.cleanupMustGatherResources(logf.Log, mg, operatorNs)
+
+			// Assert error expectation
+			if tt.expectError && err == nil {
+				t.Fatalf("expected error but got none")
+			}
+			if !tt.expectError && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			// Run post-test checks
+			tt.postTestChecks(t, base)
+		})
 	}
-	if res != (reconcile.Result{}) {
-		t.Fatalf("expected empty result, got: %+v", res)
+}
+
+func TestReconcile(t *testing.T) {
+	const operatorNs = "must-gather-operator"
+
+	tests := []struct {
+		name           string
+		setupEnv       func(t *testing.T)
+		setupObjects   func() []client.Object
+		interceptors   func() interceptClient
+		expectError    bool
+		expectResult   reconcile.Result
+		postTestChecks func(t *testing.T, cl client.Client)
+	}{
+		{
+			name:     "reconcile_mustgather_not_found_returns_empty_result",
+			setupEnv: func(t *testing.T) {},
+			setupObjects: func() []client.Object {
+				return []client.Object{}
+			},
+			interceptors:   func() interceptClient { return interceptClient{} },
+			expectError:    false,
+			expectResult:   reconcile.Result{},
+			postTestChecks: func(t *testing.T, cl client.Client) {},
+		},
+		{
+			name:     "reconcile_mustgather_get_error_returns_error",
+			setupEnv: func(t *testing.T) {},
+			setupObjects: func() []client.Object {
+				return []client.Object{}
+			},
+			interceptors: func() interceptClient {
+				return interceptClient{
+					onGet: func(ctx context.Context, key client.ObjectKey, obj client.Object) error {
+						if _, ok := obj.(*mustgatherv1alpha1.MustGather); ok {
+							return errors.New("boom get mg")
+						}
+						return nil
+					},
+				}
+			},
+			expectError:    true,
+			expectResult:   reconcile.Result{},
+			postTestChecks: func(t *testing.T, cl client.Client) {},
+		},
+		{
+			name:     "reconcile_initialize_mustgather_update_succeeds",
+			setupEnv: func(t *testing.T) {},
+			setupObjects: func() []client.Object {
+				mg := &mustgatherv1alpha1.MustGather{ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: "ns"}}
+				return []client.Object{mg}
+			},
+			interceptors:   func() interceptClient { return interceptClient{} },
+			expectError:    false,
+			expectResult:   reconcile.Result{},
+			postTestChecks: func(t *testing.T, cl client.Client) {},
+		},
+		{
+			name:     "reconcile_initialize_mustgather_update_fails",
+			setupEnv: func(t *testing.T) {},
+			setupObjects: func() []client.Object {
+				mg := &mustgatherv1alpha1.MustGather{ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: "ns"}}
+				return []client.Object{mg}
+			},
+			interceptors: func() interceptClient {
+				return interceptClient{
+					onUpdate: func(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
+						if _, ok := obj.(*mustgatherv1alpha1.MustGather); ok {
+							return errors.New("boom update mg")
+						}
+						return nil
+					},
+				}
+			},
+			expectError:    true,
+			expectResult:   reconcile.Result{},
+			postTestChecks: func(t *testing.T, cl client.Client) {},
+		},
+		{
+			name:     "reconcile_deletion_cleanup_and_finalizer_removal_success",
+			setupEnv: func(t *testing.T) {},
+			setupObjects: func() []client.Object {
+				secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "s", Namespace: operatorNs}}
+				mg := &mustgatherv1alpha1.MustGather{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "mg", Namespace: operatorNs,
+						Finalizers:        []string{mustGatherFinalizer},
+						DeletionTimestamp: &metav1.Time{Time: time.Now()},
+					},
+					Spec: mustgatherv1alpha1.MustGatherSpec{
+						CaseManagementAccountSecretRef: corev1.LocalObjectReference{Name: "s"},
+						ServiceAccountRef:              corev1.LocalObjectReference{Name: "default"},
+					},
+				}
+				return []client.Object{mg, secret}
+			},
+			interceptors: func() interceptClient { return interceptClient{} },
+			expectError:  false,
+			expectResult: reconcile.Result{},
+			postTestChecks: func(t *testing.T, cl client.Client) {
+				out := &mustgatherv1alpha1.MustGather{}
+				_ = cl.Get(context.TODO(), types.NamespacedName{Name: "mg", Namespace: operatorNs}, out)
+				if contains(out.GetFinalizers(), mustGatherFinalizer) {
+					t.Fatalf("expected finalizer removed")
+				}
+			},
+		},
+		{
+			name: "reconcile_deletion_cleanup_error_returns_error",
+			setupEnv: func(t *testing.T) {
+				t.Setenv("OSDK_FORCE_RUN_MODE", "local")
+			},
+			setupObjects: func() []client.Object {
+				mg := &mustgatherv1alpha1.MustGather{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "mg", Namespace: operatorNs,
+						Finalizers:        []string{mustGatherFinalizer},
+						DeletionTimestamp: &metav1.Time{Time: time.Now()},
+					},
+					Spec: mustgatherv1alpha1.MustGatherSpec{
+						CaseManagementAccountSecretRef: corev1.LocalObjectReference{Name: "s"},
+						ServiceAccountRef:              corev1.LocalObjectReference{Name: "default"},
+					},
+				}
+				secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "s", Namespace: operatorNs}}
+				return []client.Object{mg, secret}
+			},
+			interceptors: func() interceptClient {
+				return interceptClient{
+					onDelete: func(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error {
+						if _, ok := obj.(*corev1.Secret); ok {
+							return errors.New("boom secret delete")
+						}
+						return nil
+					},
+				}
+			},
+			expectError:    true,
+			expectResult:   reconcile.Result{},
+			postTestChecks: func(t *testing.T, cl client.Client) {},
+		},
+		{
+			name:     "reconcile_add_finalizer_update_fails",
+			setupEnv: func(t *testing.T) {},
+			setupObjects: func() []client.Object {
+				mg := &mustgatherv1alpha1.MustGather{ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: "ns"}}
+				return []client.Object{mg}
+			},
+			interceptors: func() interceptClient {
+				return interceptClient{
+					onUpdate: func(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
+						if _, ok := obj.(*mustgatherv1alpha1.MustGather); ok {
+							return errors.New("boom add finalizer")
+						}
+						return nil
+					},
+				}
+			},
+			expectError:    true,
+			expectResult:   reconcile.Result{},
+			postTestChecks: func(t *testing.T, cl client.Client) {},
+		},
+		{
+			name: "reconcile_job_template_env_missing_returns_error",
+			setupEnv: func(t *testing.T) {
+				osUnset := os.Getenv("OPERATOR_IMAGE")
+				_ = os.Unsetenv("OPERATOR_IMAGE")
+				t.Cleanup(func() { os.Setenv("OPERATOR_IMAGE", osUnset) })
+			},
+			setupObjects: func() []client.Object {
+				mg := &mustgatherv1alpha1.MustGather{
+					ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: "ns"},
+					Spec: mustgatherv1alpha1.MustGatherSpec{
+						ServiceAccountRef: corev1.LocalObjectReference{Name: "default"},
+					},
+				}
+				return []client.Object{mg}
+			},
+			interceptors:   func() interceptClient { return interceptClient{} },
+			expectError:    true,
+			expectResult:   reconcile.Result{},
+			postTestChecks: func(t *testing.T, cl client.Client) {},
+		},
+		{
+			name: "reconcile_job_template_cluster_version_missing_returns_error",
+			setupEnv: func(t *testing.T) {
+				os.Setenv("OPERATOR_IMAGE", "img")
+			},
+			setupObjects: func() []client.Object {
+				mg := &mustgatherv1alpha1.MustGather{
+					ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: "ns"},
+					Spec: mustgatherv1alpha1.MustGatherSpec{
+						ServiceAccountRef: corev1.LocalObjectReference{Name: "default"},
+					},
+				}
+				return []client.Object{mg}
+			},
+			interceptors:   func() interceptClient { return interceptClient{} },
+			expectError:    true,
+			expectResult:   reconcile.Result{},
+			postTestChecks: func(t *testing.T, cl client.Client) {},
+		},
+		{
+			name: "reconcile_job_not_found_user_secret_missing_error",
+			setupEnv: func(t *testing.T) {
+				os.Setenv("OPERATOR_IMAGE", "img")
+			},
+			setupObjects: func() []client.Object {
+				mg := &mustgatherv1alpha1.MustGather{
+					ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: "ns", Finalizers: []string{mustGatherFinalizer}},
+					Spec: mustgatherv1alpha1.MustGatherSpec{
+						CaseManagementAccountSecretRef: corev1.LocalObjectReference{Name: "sec"},
+						ServiceAccountRef:              corev1.LocalObjectReference{Name: "default"},
+					},
+				}
+				cv := &configv1.ClusterVersion{
+					ObjectMeta: metav1.ObjectMeta{Name: "version"},
+					Status: configv1.ClusterVersionStatus{
+						History: []configv1.UpdateHistory{{State: "Completed", Version: "1.2.3"}},
+					},
+				}
+				return []client.Object{mg, cv}
+			},
+			interceptors:   func() interceptClient { return interceptClient{} },
+			expectError:    true,
+			expectResult:   reconcile.Result{},
+			postTestChecks: func(t *testing.T, cl client.Client) {},
+		},
+		{
+			name: "reconcile_job_not_found_operator_secret_get_error",
+			setupEnv: func(t *testing.T) {
+				os.Setenv("OPERATOR_IMAGE", "img")
+			},
+			setupObjects: func() []client.Object {
+				mg := &mustgatherv1alpha1.MustGather{
+					ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: "ns", Finalizers: []string{mustGatherFinalizer}},
+					Spec: mustgatherv1alpha1.MustGatherSpec{
+						CaseManagementAccountSecretRef: corev1.LocalObjectReference{Name: "sec"},
+						ServiceAccountRef:              corev1.LocalObjectReference{Name: "default"},
+					},
+				}
+				userSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "sec", Namespace: "ns"}}
+				cv := &configv1.ClusterVersion{
+					ObjectMeta: metav1.ObjectMeta{Name: "version"},
+					Status: configv1.ClusterVersionStatus{
+						History: []configv1.UpdateHistory{{State: "Completed", Version: "1.2.3"}},
+					},
+				}
+				return []client.Object{mg, userSecret, cv}
+			},
+			interceptors: func() interceptClient {
+				return interceptClient{
+					onGet: func(ctx context.Context, key client.ObjectKey, obj client.Object) error {
+						if _, ok := obj.(*corev1.Secret); ok && key.Namespace == defaultMustGatherNamespace && key.Name == "sec" {
+							return errors.New("boom newSecret get")
+						}
+						return nil
+					},
+				}
+			},
+			expectError:    true,
+			expectResult:   reconcile.Result{},
+			postTestChecks: func(t *testing.T, cl client.Client) {},
+		},
+		{
+			name: "reconcile_job_active_updates_status_running",
+			setupEnv: func(t *testing.T) {
+				os.Setenv("OPERATOR_IMAGE", "img")
+			},
+			setupObjects: func() []client.Object {
+				mg := &mustgatherv1alpha1.MustGather{
+					ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: "ns", Finalizers: []string{mustGatherFinalizer}},
+					Spec: mustgatherv1alpha1.MustGatherSpec{
+						CaseManagementAccountSecretRef: corev1.LocalObjectReference{Name: "sec"},
+						ServiceAccountRef:              corev1.LocalObjectReference{Name: "default"},
+					},
+				}
+				userSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "sec", Namespace: "ns"}}
+				cv := &configv1.ClusterVersion{
+					ObjectMeta: metav1.ObjectMeta{Name: "version"},
+					Status: configv1.ClusterVersionStatus{
+						History: []configv1.UpdateHistory{{State: "Completed", Version: "1.2.3"}},
+					},
+				}
+				job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: "ns"}}
+				job.Status.Active = 1
+				return []client.Object{mg, userSecret, cv, job}
+			},
+			interceptors:   func() interceptClient { return interceptClient{} },
+			expectError:    false,
+			expectResult:   reconcile.Result{},
+			postTestChecks: func(t *testing.T, cl client.Client) {},
+		},
+		{
+			name: "reconcile_job_succeeded_retain_resources_no_cleanup",
+			setupEnv: func(t *testing.T) {
+				os.Setenv("OPERATOR_IMAGE", "img")
+			},
+			setupObjects: func() []client.Object {
+				mg := &mustgatherv1alpha1.MustGather{
+					ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: operatorNs, Finalizers: []string{mustGatherFinalizer}},
+					Spec: mustgatherv1alpha1.MustGatherSpec{
+						CaseManagementAccountSecretRef: corev1.LocalObjectReference{Name: "sec"},
+						ServiceAccountRef:              corev1.LocalObjectReference{Name: "default"},
+						InternalUser:                   true,
+						RetainResourcesOnCompletion:    true,
+					},
+				}
+				userSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "sec", Namespace: operatorNs}}
+				job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: operatorNs}}
+				job.Status.Succeeded = 1
+				cv := &configv1.ClusterVersion{
+					ObjectMeta: metav1.ObjectMeta{Name: "version"},
+					Status: configv1.ClusterVersionStatus{
+						History: []configv1.UpdateHistory{{State: "Completed", Version: "1.2.3"}},
+					},
+				}
+				return []client.Object{mg, userSecret, cv, job}
+			},
+			interceptors: func() interceptClient { return interceptClient{} },
+			expectError:  false,
+			expectResult: reconcile.Result{},
+			postTestChecks: func(t *testing.T, cl client.Client) {
+				chk := &batchv1.Job{}
+				if e := cl.Get(context.TODO(), types.NamespacedName{Namespace: operatorNs, Name: "mg"}, chk); e != nil {
+					t.Fatalf("expected job to remain, err: %v", e)
+				}
+			},
+		},
+		{
+			name: "reconcile_job_succeeded_cleanup_error_returns_error",
+			setupEnv: func(t *testing.T) {
+				t.Setenv("OSDK_FORCE_RUN_MODE", "local")
+				os.Setenv("OPERATOR_IMAGE", "img")
+			},
+			setupObjects: func() []client.Object {
+				mg := &mustgatherv1alpha1.MustGather{
+					ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: operatorNs, Finalizers: []string{mustGatherFinalizer}},
+					Spec: mustgatherv1alpha1.MustGatherSpec{
+						CaseManagementAccountSecretRef: corev1.LocalObjectReference{Name: "sec"},
+						ServiceAccountRef:              corev1.LocalObjectReference{Name: "default"},
+					},
+				}
+				userSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "sec", Namespace: operatorNs}}
+				job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: operatorNs}}
+				job.Status.Succeeded = 1
+				cv := &configv1.ClusterVersion{
+					ObjectMeta: metav1.ObjectMeta{Name: "version"},
+					Status: configv1.ClusterVersionStatus{
+						History: []configv1.UpdateHistory{{State: "Completed", Version: "1.2.3"}},
+					},
+				}
+				return []client.Object{mg, userSecret, cv, job}
+			},
+			interceptors: func() interceptClient {
+				return interceptClient{
+					onDelete: func(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error {
+						if _, ok := obj.(*batchv1.Job); ok {
+							return errors.New("boom job delete")
+						}
+						return nil
+					},
+				}
+			},
+			expectError:    true,
+			expectResult:   reconcile.Result{},
+			postTestChecks: func(t *testing.T, cl client.Client) {},
+		},
+		{
+			name: "reconcile_job_failed_cleanup_error_returns_error",
+			setupEnv: func(t *testing.T) {
+				t.Setenv("OSDK_FORCE_RUN_MODE", "local")
+				os.Setenv("OPERATOR_IMAGE", "img")
+			},
+			setupObjects: func() []client.Object {
+				mg := &mustgatherv1alpha1.MustGather{
+					ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: operatorNs, Finalizers: []string{mustGatherFinalizer}},
+					Spec: mustgatherv1alpha1.MustGatherSpec{
+						CaseManagementAccountSecretRef: corev1.LocalObjectReference{Name: "sec"},
+						ServiceAccountRef:              corev1.LocalObjectReference{Name: "default"},
+					},
+				}
+				userSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "sec", Namespace: operatorNs}}
+				job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: operatorNs}}
+				job.Status.Failed = 1
+				cv := &configv1.ClusterVersion{
+					ObjectMeta: metav1.ObjectMeta{Name: "version"},
+					Status: configv1.ClusterVersionStatus{
+						History: []configv1.UpdateHistory{{State: "Completed", Version: "1.2.3"}},
+					},
+				}
+				return []client.Object{mg, userSecret, cv, job}
+			},
+			interceptors: func() interceptClient {
+				return interceptClient{
+					onDelete: func(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error {
+						if _, ok := obj.(*corev1.Secret); ok {
+							return errors.New("boom secret delete")
+						}
+						return nil
+					},
+				}
+			},
+			expectError:    true,
+			expectResult:   reconcile.Result{},
+			postTestChecks: func(t *testing.T, cl client.Client) {},
+		},
+		{
+			name: "reconcile_job_completed_no_terminal_status_updates_completed",
+			setupEnv: func(t *testing.T) {
+				os.Setenv("OPERATOR_IMAGE", "img")
+			},
+			setupObjects: func() []client.Object {
+				mg := &mustgatherv1alpha1.MustGather{
+					ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: "ns", Finalizers: []string{mustGatherFinalizer}},
+					Spec: mustgatherv1alpha1.MustGatherSpec{
+						CaseManagementAccountSecretRef: corev1.LocalObjectReference{Name: "sec"},
+						ServiceAccountRef:              corev1.LocalObjectReference{Name: "default"},
+					},
+				}
+				userSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "sec", Namespace: "ns"}}
+				job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: "ns"}}
+				ct := metav1.NewTime(time.Now())
+				job.Status.CompletionTime = &ct
+				cv := &configv1.ClusterVersion{
+					ObjectMeta: metav1.ObjectMeta{Name: "version"},
+					Status: configv1.ClusterVersionStatus{
+						History: []configv1.UpdateHistory{{State: "Completed", Version: "1.2.3"}},
+					},
+				}
+				return []client.Object{mg, userSecret, cv, job}
+			},
+			interceptors: func() interceptClient { return interceptClient{} },
+			expectError:  false,
+			expectResult: reconcile.Result{},
+			postTestChecks: func(t *testing.T, cl client.Client) {
+				out := &mustgatherv1alpha1.MustGather{}
+				_ = cl.Get(context.TODO(), types.NamespacedName{Name: "mg", Namespace: "ns"}, out)
+				if !out.Status.Completed {
+					t.Fatalf("expected Completed=true from updateStatus")
+				}
+			},
+		},
+		{
+			name: "reconcile_job_failed_retain_resources_no_cleanup",
+			setupEnv: func(t *testing.T) {
+				os.Setenv("OPERATOR_IMAGE", "img")
+			},
+			setupObjects: func() []client.Object {
+				mg := &mustgatherv1alpha1.MustGather{
+					ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: "ns", Finalizers: []string{mustGatherFinalizer}},
+					Spec: mustgatherv1alpha1.MustGatherSpec{
+						CaseManagementAccountSecretRef: corev1.LocalObjectReference{Name: "sec"},
+						ServiceAccountRef:              corev1.LocalObjectReference{Name: "default"},
+						RetainResourcesOnCompletion:    true,
+					},
+				}
+				job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: "ns"}}
+				job.Status.Failed = 1
+				cv := &configv1.ClusterVersion{
+					ObjectMeta: metav1.ObjectMeta{Name: "version"},
+					Status: configv1.ClusterVersionStatus{
+						History: []configv1.UpdateHistory{{State: "Completed", Version: "1.2.3"}},
+					},
+				}
+				return []client.Object{mg, cv, job}
+			},
+			interceptors: func() interceptClient { return interceptClient{} },
+			expectError:  false,
+			expectResult: reconcile.Result{},
+			postTestChecks: func(t *testing.T, cl client.Client) {
+				out := &mustgatherv1alpha1.MustGather{}
+				if getErr := cl.Get(context.TODO(), types.NamespacedName{Name: "mg", Namespace: "ns"}, out); getErr != nil {
+					t.Fatalf("failed to get mustgather: %v", getErr)
+				}
+				if !out.Status.Completed || out.Status.Status != "Failed" || out.Status.Reason != "MustGather Job pods failed" {
+					t.Fatalf("unexpected status after failed without cleanup: %+v", out.Status)
+				}
+			},
+		},
+		{
+			name: "reconcile_job_succeeded_status_update_fails_line236",
+			setupEnv: func(t *testing.T) {
+				os.Setenv("OPERATOR_IMAGE", "img")
+			},
+			setupObjects: func() []client.Object {
+				mg := &mustgatherv1alpha1.MustGather{
+					ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: operatorNs, Finalizers: []string{mustGatherFinalizer}},
+					Spec: mustgatherv1alpha1.MustGatherSpec{
+						CaseManagementAccountSecretRef: corev1.LocalObjectReference{Name: "sec"},
+						ServiceAccountRef:              corev1.LocalObjectReference{Name: "default"},
+					},
+				}
+				userSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "sec", Namespace: operatorNs}}
+				job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: operatorNs}}
+				job.Status.Succeeded = 1
+				cv := &configv1.ClusterVersion{
+					ObjectMeta: metav1.ObjectMeta{Name: "version"},
+					Status: configv1.ClusterVersionStatus{
+						History: []configv1.UpdateHistory{{State: "Completed", Version: "1.2.3"}},
+					},
+				}
+				return []client.Object{mg, userSecret, cv, job}
+			},
+			interceptors: func() interceptClient {
+				return interceptClient{
+					status: &failingStatusWriter{},
+				}
+			},
+			expectError:    true,
+			expectResult:   reconcile.Result{},
+			postTestChecks: func(t *testing.T, cl client.Client) {},
+		},
+		{
+			name: "reconcile_job_failed_status_update_fails_line260",
+			setupEnv: func(t *testing.T) {
+				os.Setenv("OPERATOR_IMAGE", "img")
+			},
+			setupObjects: func() []client.Object {
+				mg := &mustgatherv1alpha1.MustGather{
+					ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: operatorNs, Finalizers: []string{mustGatherFinalizer}},
+					Spec: mustgatherv1alpha1.MustGatherSpec{
+						CaseManagementAccountSecretRef: corev1.LocalObjectReference{Name: "sec"},
+						ServiceAccountRef:              corev1.LocalObjectReference{Name: "default"},
+					},
+				}
+				userSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "sec", Namespace: operatorNs}}
+				job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: operatorNs}}
+				job.Status.Failed = 1
+				cv := &configv1.ClusterVersion{
+					ObjectMeta: metav1.ObjectMeta{Name: "version"},
+					Status: configv1.ClusterVersionStatus{
+						History: []configv1.UpdateHistory{{State: "Completed", Version: "1.2.3"}},
+					},
+				}
+				return []client.Object{mg, userSecret, cv, job}
+			},
+			interceptors: func() interceptClient {
+				return interceptClient{
+					status: &failingStatusWriter{},
+				}
+			},
+			expectError:    true,
+			expectResult:   reconcile.Result{},
+			postTestChecks: func(t *testing.T, cl client.Client) {},
+		},
+		{
+			name:     "reconcile_deletion_finalizer_removal_update_fails_line141",
+			setupEnv: func(t *testing.T) {},
+			setupObjects: func() []client.Object {
+				operatorNs := "must-gather-operator"
+				secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "s", Namespace: operatorNs}}
+				mg := &mustgatherv1alpha1.MustGather{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "mg", Namespace: operatorNs,
+						Finalizers:        []string{mustGatherFinalizer},
+						DeletionTimestamp: &metav1.Time{Time: time.Now()},
+					},
+					Spec: mustgatherv1alpha1.MustGatherSpec{
+						CaseManagementAccountSecretRef: corev1.LocalObjectReference{Name: "s"},
+						ServiceAccountRef:              corev1.LocalObjectReference{Name: "default"},
+					},
+				}
+				return []client.Object{mg, secret}
+			},
+			interceptors: func() interceptClient {
+				updateCount := 0
+				return interceptClient{
+					onUpdate: func(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
+						if mgObj, ok := obj.(*mustgatherv1alpha1.MustGather); ok {
+							updateCount++
+							// Fail the update when removing finalizer (after cleanup is done)
+							if updateCount > 0 && !contains(mgObj.GetFinalizers(), mustGatherFinalizer) {
+								return errors.New("boom finalizer removal update")
+							}
+						}
+						return nil
+					},
+				}
+			},
+			expectError:    true,
+			expectResult:   reconcile.Result{},
+			postTestChecks: func(t *testing.T, cl client.Client) {},
+		},
+		{
+			name:     "reconcile_add_finalizer_fails_line150",
+			setupEnv: func(t *testing.T) {},
+			setupObjects: func() []client.Object {
+				mg := &mustgatherv1alpha1.MustGather{
+					ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: "ns"},
+					Spec: mustgatherv1alpha1.MustGatherSpec{
+						ServiceAccountRef: corev1.LocalObjectReference{Name: "default"}, // Pre-initialized to skip IsInitialized update
+					},
+				}
+				return []client.Object{mg}
+			},
+			interceptors: func() interceptClient {
+				return interceptClient{
+					onUpdate: func(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
+						if mgObj, ok := obj.(*mustgatherv1alpha1.MustGather); ok {
+							// Fail when trying to add the finalizer (when finalizer is present in the object)
+							if contains(mgObj.GetFinalizers(), mustGatherFinalizer) {
+								return errors.New("boom add finalizer")
+							}
+						}
+						return nil
+					},
+				}
+			},
+			expectError:    true,
+			expectResult:   reconcile.Result{},
+			postTestChecks: func(t *testing.T, cl client.Client) {},
+		},
+		{
+			name: "reconcile_job_not_found_create_job_fails_line207",
+			setupEnv: func(t *testing.T) {
+				os.Setenv("OPERATOR_IMAGE", "img")
+			},
+			setupObjects: func() []client.Object {
+				mg := &mustgatherv1alpha1.MustGather{
+					ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: operatorNs, Finalizers: []string{mustGatherFinalizer}},
+					Spec: mustgatherv1alpha1.MustGatherSpec{
+						CaseManagementAccountSecretRef: corev1.LocalObjectReference{Name: "sec"},
+						ServiceAccountRef:              corev1.LocalObjectReference{Name: "default"},
+					},
+				}
+				userSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "sec", Namespace: operatorNs}}
+				cv := &configv1.ClusterVersion{
+					ObjectMeta: metav1.ObjectMeta{Name: "version"},
+					Status: configv1.ClusterVersionStatus{
+						History: []configv1.UpdateHistory{{State: "Completed", Version: "1.2.3"}},
+					},
+				}
+				return []client.Object{mg, userSecret, cv}
+			},
+			interceptors: func() interceptClient {
+				return interceptClient{
+					onCreate: func(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
+						// Fail job creation
+						if _, ok := obj.(*batchv1.Job); ok {
+							return errors.New("boom job create")
+						}
+						return nil
+					},
+				}
+			},
+			expectError:    true,
+			expectResult:   reconcile.Result{},
+			postTestChecks: func(t *testing.T, cl client.Client) {},
+		},
+		{
+			name: "reconcile_job_not_found_create_job_succeeds",
+			setupEnv: func(t *testing.T) {
+				os.Setenv("OPERATOR_IMAGE", "img")
+			},
+			setupObjects: func() []client.Object {
+				mg := &mustgatherv1alpha1.MustGather{
+					ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: operatorNs, Finalizers: []string{mustGatherFinalizer}},
+					Spec: mustgatherv1alpha1.MustGatherSpec{
+						CaseManagementAccountSecretRef: corev1.LocalObjectReference{Name: "sec"},
+						ServiceAccountRef:              corev1.LocalObjectReference{Name: "default"},
+					},
+				}
+				userSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "sec", Namespace: operatorNs}}
+				cv := &configv1.ClusterVersion{
+					ObjectMeta: metav1.ObjectMeta{Name: "version"},
+					Status: configv1.ClusterVersionStatus{
+						History: []configv1.UpdateHistory{{State: "Completed", Version: "1.2.3"}},
+					},
+				}
+				return []client.Object{mg, userSecret, cv}
+			},
+			interceptors: func() interceptClient { return interceptClient{} },
+			expectError:  false,
+			expectResult: reconcile.Result{},
+			postTestChecks: func(t *testing.T, cl client.Client) {
+				// Verify job was created
+				job := &batchv1.Job{}
+				if err := cl.Get(context.TODO(), types.NamespacedName{Namespace: operatorNs, Name: "mg"}, job); err != nil {
+					t.Fatalf("expected job to be created, but got error: %v", err)
+				}
+			},
+		},
+		{
+			name: "reconcile_job_lookup_error_non_notfound_line216",
+			setupEnv: func(t *testing.T) {
+				os.Setenv("OPERATOR_IMAGE", "img")
+			},
+			setupObjects: func() []client.Object {
+				mg := &mustgatherv1alpha1.MustGather{
+					ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: "ns", Finalizers: []string{mustGatherFinalizer}},
+					Spec: mustgatherv1alpha1.MustGatherSpec{
+						CaseManagementAccountSecretRef: corev1.LocalObjectReference{Name: "sec"},
+						ServiceAccountRef:              corev1.LocalObjectReference{Name: "default"},
+					},
+				}
+				userSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "sec", Namespace: "ns"}}
+				cv := &configv1.ClusterVersion{
+					ObjectMeta: metav1.ObjectMeta{Name: "version"},
+					Status: configv1.ClusterVersionStatus{
+						History: []configv1.UpdateHistory{{State: "Completed", Version: "1.2.3"}},
+					},
+				}
+				return []client.Object{mg, userSecret, cv}
+			},
+			interceptors: func() interceptClient {
+				return interceptClient{
+					onGet: func(ctx context.Context, key client.ObjectKey, obj client.Object) error {
+						// Fail the initial job lookup with a non-NotFound error (lines 162-165)
+						if _, ok := obj.(*batchv1.Job); ok && key.Name == "mg" && key.Namespace == "ns" {
+							return errors.New("API server error - unable to look up job")
+						}
+						return nil
+					},
+				}
+			},
+			expectError:    true,
+			expectResult:   reconcile.Result{},
+			postTestChecks: func(t *testing.T, cl client.Client) {},
+		},
+		{
+			name: "reconcile_job_not_found_operator_secret_create_fails_line194",
+			setupEnv: func(t *testing.T) {
+				os.Setenv("OPERATOR_IMAGE", "img")
+			},
+			setupObjects: func() []client.Object {
+				mg := &mustgatherv1alpha1.MustGather{
+					ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: "ns", Finalizers: []string{mustGatherFinalizer}},
+					Spec: mustgatherv1alpha1.MustGatherSpec{
+						CaseManagementAccountSecretRef: corev1.LocalObjectReference{Name: "sec"},
+						ServiceAccountRef:              corev1.LocalObjectReference{Name: "default"},
+					},
+				}
+				userSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "sec", Namespace: "ns"}}
+				cv := &configv1.ClusterVersion{
+					ObjectMeta: metav1.ObjectMeta{Name: "version"},
+					Status: configv1.ClusterVersionStatus{
+						History: []configv1.UpdateHistory{{State: "Completed", Version: "1.2.3"}},
+					},
+				}
+				return []client.Object{mg, userSecret, cv}
+			},
+			interceptors: func() interceptClient {
+				return interceptClient{
+					onGet: func(ctx context.Context, key client.ObjectKey, obj client.Object) error {
+						// Return not found for the secret in operator namespace to trigger create
+						if _, ok := obj.(*corev1.Secret); ok && key.Namespace == defaultMustGatherNamespace && key.Name == "sec" {
+							return apierrors.NewNotFound(corev1.Resource("secret"), key.Name)
+						}
+						return nil
+					},
+					onCreate: func(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
+						// Fail secret creation
+						if _, ok := obj.(*corev1.Secret); ok {
+							return errors.New("boom secret create")
+						}
+						return nil
+					},
+				}
+			},
+			expectError:    true,
+			expectResult:   reconcile.Result{},
+			postTestChecks: func(t *testing.T, cl client.Client) {},
+		},
 	}
 
-	out := &mustgatherv1alpha1.MustGather{}
-	if getErr := cl.Get(context.TODO(), types.NamespacedName{Name: mg.Name, Namespace: mg.Namespace}, out); getErr != nil {
-		t.Fatalf("failed to get mustgather: %v", getErr)
-	}
-	if !out.Status.Completed || out.Status.Status != "Failed" || out.Status.Reason != "MustGather Job pods failed" {
-		t.Fatalf("unexpected status after failed without cleanup: %+v", out.Status)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Setup environment
+			tt.setupEnv(t)
+
+			// Setup scheme
+			s := runtime.NewScheme()
+			_ = corev1.AddToScheme(s)
+			_ = batchv1.AddToScheme(s)
+			_ = mustgatherv1alpha1.AddToScheme(s)
+			_ = configv1.AddToScheme(s)
+
+			// Setup objects and client
+			objects := tt.setupObjects()
+			base := fake.NewClientBuilder().WithScheme(s).WithObjects(objects...).WithStatusSubresource(&mustgatherv1alpha1.MustGather{}).Build()
+
+			// Setup interceptor if needed
+			interceptor := tt.interceptors()
+			var cl client.Client = base
+			if interceptor.onGet != nil || interceptor.onList != nil || interceptor.onDelete != nil || interceptor.onUpdate != nil || interceptor.onCreate != nil || interceptor.status != nil {
+				interceptor.Client = base
+				cl = interceptor
+			}
+
+			// Create reconciler
+			r := &MustGatherReconciler{ReconcilerBase: util.NewReconcilerBase(cl, s, &rest.Config{}, &record.FakeRecorder{}, nil)}
+
+			// Determine request based on test objects
+			var req reconcile.Request
+			for _, obj := range objects {
+				if mgObj, ok := obj.(*mustgatherv1alpha1.MustGather); ok {
+					req = reconcile.Request{NamespacedName: types.NamespacedName{Name: mgObj.Name, Namespace: mgObj.Namespace}}
+					break
+				}
+			}
+			// Default request if no MustGather object found
+			if req.Name == "" {
+				req = reconcile.Request{NamespacedName: types.NamespacedName{Name: "x", Namespace: "y"}}
+			}
+
+			// Execute
+			res, err := r.Reconcile(context.TODO(), req)
+
+			// Assert error expectation
+			if tt.expectError && err == nil {
+				t.Fatalf("expected error but got none")
+			}
+			if !tt.expectError && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			// Assert result expectation
+			if res != tt.expectResult {
+				t.Fatalf("expected result %+v, got %+v", tt.expectResult, res)
+			}
+
+			// Run post-test checks
+			tt.postTestChecks(t, base)
+		})
 	}
 }
