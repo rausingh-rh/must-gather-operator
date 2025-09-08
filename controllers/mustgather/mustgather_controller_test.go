@@ -947,7 +947,7 @@ func TestReconcile(t *testing.T) {
 			},
 		},
 		{
-			name: "reconcile_job_succeeded_status_update_fails_line236",
+			name: "reconcile_job_succeeded_status_update_fails",
 			setupEnv: func(t *testing.T) {
 				os.Setenv("OPERATOR_IMAGE", "img")
 			},
@@ -980,7 +980,7 @@ func TestReconcile(t *testing.T) {
 			postTestChecks: func(t *testing.T, cl client.Client) {},
 		},
 		{
-			name: "reconcile_job_failed_status_update_fails_line260",
+			name: "reconcile_job_failed_status_update_fails",
 			setupEnv: func(t *testing.T) {
 				os.Setenv("OPERATOR_IMAGE", "img")
 			},
@@ -1013,7 +1013,7 @@ func TestReconcile(t *testing.T) {
 			postTestChecks: func(t *testing.T, cl client.Client) {},
 		},
 		{
-			name:     "reconcile_deletion_finalizer_removal_update_fails_line141",
+			name:     "reconcile_deletion_finalizer_removal_update_fails",
 			setupEnv: func(t *testing.T) {},
 			setupObjects: func() []client.Object {
 				operatorNs := "must-gather-operator"
@@ -1051,7 +1051,7 @@ func TestReconcile(t *testing.T) {
 			postTestChecks: func(t *testing.T, cl client.Client) {},
 		},
 		{
-			name:     "reconcile_add_finalizer_fails_line150",
+			name:     "reconcile_add_finalizer_fails",
 			setupEnv: func(t *testing.T) {},
 			setupObjects: func() []client.Object {
 				mg := &mustgatherv1alpha1.MustGather{
@@ -1080,7 +1080,7 @@ func TestReconcile(t *testing.T) {
 			postTestChecks: func(t *testing.T, cl client.Client) {},
 		},
 		{
-			name: "reconcile_job_not_found_create_job_fails_line207",
+			name: "reconcile_job_not_found_create_job_fails",
 			setupEnv: func(t *testing.T) {
 				os.Setenv("OPERATOR_IMAGE", "img")
 			},
@@ -1150,7 +1150,7 @@ func TestReconcile(t *testing.T) {
 			},
 		},
 		{
-			name: "reconcile_job_lookup_error_non_notfound_line216",
+			name: "reconcile_job_lookup_error_non_notfound",
 			setupEnv: func(t *testing.T) {
 				os.Setenv("OPERATOR_IMAGE", "img")
 			},
@@ -1174,7 +1174,7 @@ func TestReconcile(t *testing.T) {
 			interceptors: func() interceptClient {
 				return interceptClient{
 					onGet: func(ctx context.Context, key client.ObjectKey, obj client.Object) error {
-						// Fail the initial job lookup with a non-NotFound error (lines 162-165)
+						// Fail the initial job lookup with a non-NotFound error
 						if _, ok := obj.(*batchv1.Job); ok && key.Name == "mg" && key.Namespace == "ns" {
 							return errors.New("API server error - unable to look up job")
 						}
@@ -1187,7 +1187,7 @@ func TestReconcile(t *testing.T) {
 			postTestChecks: func(t *testing.T, cl client.Client) {},
 		},
 		{
-			name: "reconcile_job_not_found_operator_secret_create_fails_line194",
+			name: "reconcile_job_not_found_operator_secret_create_fails",
 			setupEnv: func(t *testing.T) {
 				os.Setenv("OPERATOR_IMAGE", "img")
 			},
