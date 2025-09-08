@@ -395,7 +395,7 @@ func remove(list []string, s string) []string {
 
 // cleanupMustGatherResources cleans up the secret, job, and pods associated with a MustGather instance
 func (r *MustGatherReconciler) cleanupMustGatherResources(reqLogger logr.Logger, instance *mustgatherv1alpha1.MustGather, operatorNs string) error {
-	reqLogger.Info("cleaning up MustGather resources")
+	reqLogger.Info("cleaning up resources")
 	// delete secret in the operator namespace
 	tmpSecretName := instance.Spec.CaseManagementAccountSecretRef.Name
 	tmpSecret := &corev1.Secret{}
