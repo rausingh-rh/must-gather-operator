@@ -452,7 +452,7 @@ func TestCleanupMustGatherResources(t *testing.T) {
 			}
 
 			// Execute
-			err := r.cleanupMustGatherResources(logf.Log, mg, operatorNs)
+			err := r.cleanupMustGatherResources(context.TODO(), logf.Log, mg, operatorNs)
 
 			// Assert error expectation
 			if tt.expectError && err == nil {
