@@ -1102,19 +1102,81 @@ func TestReconcile(t *testing.T) {
 				}
 				return []client.Object{mg, userSecret, cv}
 			},
-			interceptors: func() interceptClient { return interceptClient{} },
+			interceptors: func() interceptClient {
+				var createdJob *batchv1.Job
+				var createdSecret *corev1.Secret
+
+				return interceptClient{
+					onCreate: func(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
+						// Mock job creation by capturing the job object
+						if job, ok := obj.(*batchv1.Job); ok {
+							createdJob = job.DeepCopy()
+							t.Logf("Mocked job creation: %s/%s", job.Namespace, job.Name)
+							return nil
+						}
+
+						// Mock secret creation by capturing the secret object
+						if secret, ok := obj.(*corev1.Secret); ok {
+							createdSecret = secret.DeepCopy()
+							t.Logf("Mocked secret creation: %s/%s", secret.Namespace, secret.Name)
+							return nil
+						}
+
+						return nil
+					},
+					onGet: func(ctx context.Context, key client.ObjectKey, obj client.Object) error {
+						// Return the mocked job when requested
+						if job, ok := obj.(*batchv1.Job); ok && key.Name == "mg" && key.Namespace == defaultMustGatherNamespace {
+							if createdJob != nil {
+								*job = *createdJob
+								return nil
+							}
+						}
+
+						// Return the mocked secret when requested
+						if secret, ok := obj.(*corev1.Secret); ok && key.Name == "sec" && key.Namespace == defaultMustGatherNamespace {
+							if createdSecret != nil {
+								*secret = *createdSecret
+								return nil
+							}
+						}
+
+						return nil
+					},
+				}
+			},
 			expectError:  false,
 			expectResult: reconcile.Result{},
 			postTestChecks: func(t *testing.T, cl client.Client) {
-				// Verify job was created in the operator namespace
+				// Verify job was "created" (mocked)
 				job := &batchv1.Job{}
 				if err := cl.Get(context.TODO(), types.NamespacedName{Namespace: defaultMustGatherNamespace, Name: "mg"}, job); err != nil {
-					t.Fatalf("expected job to be created, but got error: %v", err)
+					t.Fatalf("expected job to be created (mocked), but got error: %v", err)
 				}
-				// Verify secret was created in the operator namespace
+
+				// Verify job properties
+				if job.Name != "mg" {
+					t.Errorf("expected job name 'mg', got '%s'", job.Name)
+				}
+				if job.Namespace != defaultMustGatherNamespace {
+					t.Errorf("expected job namespace '%s', got '%s'", defaultMustGatherNamespace, job.Namespace)
+				}
+				if len(job.Spec.Template.Spec.Containers) == 0 {
+					t.Error("expected job to have containers")
+				}
+
+				// Verify secret was "created" (mocked)
 				secret := &corev1.Secret{}
 				if err := cl.Get(context.TODO(), types.NamespacedName{Namespace: defaultMustGatherNamespace, Name: "sec"}, secret); err != nil {
-					t.Fatalf("expected secret to be created in operator namespace, but got error: %v", err)
+					t.Fatalf("expected secret to be created (mocked) in operator namespace, but got error: %v", err)
+				}
+
+				// Verify secret properties
+				if secret.Name != "sec" {
+					t.Errorf("expected secret name 'sec', got '%s'", secret.Name)
+				}
+				if secret.Namespace != defaultMustGatherNamespace {
+					t.Errorf("expected secret namespace '%s', got '%s'", defaultMustGatherNamespace, secret.Namespace)
 				}
 			},
 		},
