@@ -695,42 +695,6 @@ func TestReconcile(t *testing.T) {
 			postTestChecks: func(t *testing.T, cl client.Client) {},
 		},
 		{
-			name: "reconcile_job_not_found_operator_secret_get_error",
-			setupEnv: func(t *testing.T) {
-				os.Setenv("OPERATOR_IMAGE", "img")
-			},
-			setupObjects: func() []client.Object {
-				mg := &mustgatherv1alpha1.MustGather{
-					ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: "ns", Finalizers: []string{mustGatherFinalizer}},
-					Spec: mustgatherv1alpha1.MustGatherSpec{
-						CaseManagementAccountSecretRef: corev1.LocalObjectReference{Name: "sec"},
-						ServiceAccountRef:              corev1.LocalObjectReference{Name: "default"},
-					},
-				}
-				userSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "sec", Namespace: "ns"}}
-				cv := &configv1.ClusterVersion{
-					ObjectMeta: metav1.ObjectMeta{Name: "version"},
-					Status: configv1.ClusterVersionStatus{
-						History: []configv1.UpdateHistory{{State: "Completed", Version: "1.2.3"}},
-					},
-				}
-				return []client.Object{mg, userSecret, cv}
-			},
-			interceptors: func() interceptClient {
-				return interceptClient{
-					onGet: func(ctx context.Context, key client.ObjectKey, obj client.Object) error {
-						if _, ok := obj.(*corev1.Secret); ok && key.Namespace == defaultMustGatherNamespace && key.Name == "sec" {
-							return errors.New("boom newSecret get")
-						}
-						return nil
-					},
-				}
-			},
-			expectError:    true,
-			expectResult:   reconcile.Result{},
-			postTestChecks: func(t *testing.T, cl client.Client) {},
-		},
-		{
 			name: "reconcile_job_active_updates_status_running",
 			setupEnv: func(t *testing.T) {
 				os.Setenv("OPERATOR_IMAGE", "img")
@@ -1123,13 +1087,13 @@ func TestReconcile(t *testing.T) {
 			},
 			setupObjects: func() []client.Object {
 				mg := &mustgatherv1alpha1.MustGather{
-					ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: operatorNs, Finalizers: []string{mustGatherFinalizer}},
+					ObjectMeta: metav1.ObjectMeta{Name: "mg", Namespace: "ns", Finalizers: []string{mustGatherFinalizer}},
 					Spec: mustgatherv1alpha1.MustGatherSpec{
 						CaseManagementAccountSecretRef: corev1.LocalObjectReference{Name: "sec"},
 						ServiceAccountRef:              corev1.LocalObjectReference{Name: "default"},
 					},
 				}
-				userSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "sec", Namespace: operatorNs}}
+				userSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "sec", Namespace: "ns"}}
 				cv := &configv1.ClusterVersion{
 					ObjectMeta: metav1.ObjectMeta{Name: "version"},
 					Status: configv1.ClusterVersionStatus{
@@ -1142,10 +1106,15 @@ func TestReconcile(t *testing.T) {
 			expectError:  false,
 			expectResult: reconcile.Result{},
 			postTestChecks: func(t *testing.T, cl client.Client) {
-				// Verify job was created
+				// Verify job was created in the operator namespace
 				job := &batchv1.Job{}
-				if err := cl.Get(context.TODO(), types.NamespacedName{Namespace: operatorNs, Name: "mg"}, job); err != nil {
+				if err := cl.Get(context.TODO(), types.NamespacedName{Namespace: defaultMustGatherNamespace, Name: "mg"}, job); err != nil {
 					t.Fatalf("expected job to be created, but got error: %v", err)
+				}
+				// Verify secret was created in the operator namespace
+				secret := &corev1.Secret{}
+				if err := cl.Get(context.TODO(), types.NamespacedName{Namespace: defaultMustGatherNamespace, Name: "sec"}, secret); err != nil {
+					t.Fatalf("expected secret to be created in operator namespace, but got error: %v", err)
 				}
 			},
 		},
